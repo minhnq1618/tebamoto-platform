@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: copilot
     steps:
+      - uses: actions/checkout@v4
       - name: Probe copilot subject
         env:
           CID: 72ff278a-9e71-43ec-bac4-2ca303f8e462
@@ -17,6 +18,7 @@ jobs:
   plain:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Probe plain subject
         env:
           CID: 72ff278a-9e71-43ec-bac4-2ca303f8e462
