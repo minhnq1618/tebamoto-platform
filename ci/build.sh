@@ -2,7 +2,7 @@
 set +e
 TEN="$AZURE_TENANT_ID"
 JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
-tok(){ curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" -d client_id=891fb158-e02c-4428-a885-53b811f369c0 -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion="$JWT" --data-urlencode scope="api://462d1c38-4459-48b8-9333-82e389e59514/.default" | jq -r .access_token)
+tok(){ curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" -d client_id=891fb158-e02c-4428-a885-53b811f369c0 -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion="$JWT" --data-urlencode scope="api://462d1c38-4459-48b8-9333-82e389e59514/.default" | jq -r .access_token; }
 A=$(tok)
 echo AOTLEN=${#A}
 U='https://tbl-storefront-prod-bhagdnascpfyeyfg.z02.azurefd.net/internal%5cdebug'
