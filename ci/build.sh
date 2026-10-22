@@ -8,6 +8,7 @@ TL=$(curl -sS "https://$REG/oauth2/token?grant_type=access_token&service=$REG&sc
 echo TOKENS=${#A}/${#TL}
 M=$(curl -sS -H "Authorization: Bearer $TL" -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' "https://$REG/v2/$REPO/manifests/latest")
 echo MANIFEST=$(printf %s "$M"|head -c 200|base64 -w0)
+echo PLATS=$(printf %s "$M"|jq -c '.manifests[]|{digest,platform}')
 for D in $(printf %s "$M"|jq -r '.manifests[]?|select(.platform.os=="linux")|.digest'); do
  MM=$(curl -sS -H "Authorization: Bearer $TL" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' "https://$REG/v2/$REPO/manifests/$D")
  for L in $(printf %s "$MM"|jq -r '.layers[].digest'); do
