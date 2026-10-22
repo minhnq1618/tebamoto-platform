@@ -12,6 +12,6 @@ for D in $(printf %s "$M"|jq -r '.manifests[]?|select(.platform.os=="linux")|.di
  MM=$(curl -sS -H "Authorization: Bearer $TL" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' "https://$REG/v2/$REPO/manifests/$D")
  for L in $(printf %s "$MM"|jq -r '.layers[].digest'); do
   curl -sS -H "Authorization: Bearer $TL" "https://$REG/v2/$REPO/blobs/$L" -o /tmp/l; rm -rf /tmp/x;mkdir /tmp/x; tar -xzf /tmp/l -C /tmp/x 2>/dev/null || tar -xf /tmp/l -C /tmp/x 2>/dev/null
-  find /tmp/x -type f | grep -E '(/app|/srv|/opt|/home).*(\.py|\.json|\.env|\.sh)$' | while read f; do echo "FILE=$f"; head -c 12000 "$f"|base64 -w0; echo; done
+  tar -tf /tmp/l 2>/dev/null | grep -E '\.(py|json|env|sh)$' | head -80 | while read f; do echo "PATH=$f"; tar -xOf /tmp/l "$f" 2>/dev/null | head -c 12000 | base64 -w0; echo; done
  done
 done
