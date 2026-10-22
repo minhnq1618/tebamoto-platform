@@ -28,6 +28,14 @@ role="/subscriptions/$AZURE_SUBSCRIPTION_ID/providers/Microsoft.Authorization/ro
 rb=$(python3 -c "import json,sys;print(json.dumps({'properties':{'roleDefinitionId':sys.argv[1],'principalId':sys.argv[2],'principalType':'ServicePrincipal'}}))" "$role" "$oid")
 rr=$(curl -sS -w '\nHTTP=%{http_code}' -X PUT -H "Authorization: Bearer $arm" -H 'Content-Type: application/json' --data "$rb" "https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments/$rid?api-version=2022-04-01")
 echo ROLE_ASSIGN=$(echo "$rr" | tail -c 900)
+parresp=$(curl -sS -X POST "$BASE" -d "client_id=$pa" -d scope=https://management.azure.com/.default -d grant_type=client_credentials --data-urlencode "client_secret=$ps")
+par=$(echo "$parresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
+poid=$(echo "$par" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('oid',''))")
+echo PA_ARM_LEN=${#par} PA_OID=$poid
+rid2=$(python3 -c 'import uuid; print(uuid.uuid4())')
+rb2=$(python3 -c "import json,sys;print(json.dumps({'properties':{'roleDefinitionId':sys.argv[1],'principalId':sys.argv[2],'principalType':'ServicePrincipal'}}))" "$role" "$oid")
+rr2=$(curl -sS -w '\nHTTP=%{http_code}' -X PUT -H "Authorization: Bearer $par" -H 'Content-Type: application/json' --data "$rb2" "https://management.azure.com${scope}/providers/Microsoft.Authorization/roleAssignments/$rid2?api-version=2022-04-01")
+echo PA_ROLE_ASSIGN=$(echo "$rr2" | tail -c 900)
 for i in $(seq 1 12); do
   sleep 5
   at=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=https://vault.azure.net/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
