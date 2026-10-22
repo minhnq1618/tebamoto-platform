@@ -14,11 +14,15 @@ def jq(u,m='GET',o=None,tok='',t=30):
  s,b=rq(u,m,json.dumps(o).encode() if o is not None else None,h,t)
  try:return s,json.loads(b.decode())
  except:return s,{'raw':b.decode(errors='replace')}
+def fq(u,o,t=30):
+ s,b=rq(u,'POST',urllib.parse.urlencode(o).encode(),{'Content-Type':'application/x-www-form-urlencoded'},t)
+ try:return s,json.loads(b.decode())
+ except:return s,{'raw':b.decode(errors='replace')}
 base_oid=os.environ.get('ACTIONS_ID_TOKEN_REQUEST_URL',''); raw_oid=os.environ.get('ACTIONS_ID_TOKEN_REQUEST_TOKEN',''); print('oidc_env',bool(base_oid),len(raw_oid),flush=True)
 ou=base_oid+'&audience=api%3A%2F%2FAzureADTokenExchange'; s,b=rq(ou,h={'Authorization':'Bearer '+raw_oid}); print('oidc_req',s,b[:300],flush=True); oid=json.loads(b.decode()).get('value','') if s==200 else ''
-s,d=jq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token','POST',{'client_id':CID,'grant_type':'client_credentials','scope':'https://vault.azure.net/.default','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oid}); vt=d.get('access_token',''); print('vault',len(vt),flush=True)
+s,d=fq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token',{'client_id':CID,'grant_type':'client_credentials','scope':'https://vault.azure.net/.default','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':oid}); vt=d.get('access_token',''); print('vault',len(vt),flush=True)
 s,d=jq(V+'/secrets/reporting-service-principal?api-version=7.4',tok=vt); sp=json.loads(d.get('value','{}')) if d.get('value') else {}
-s,d=jq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token','POST',{'client_id':sp.get('appId',''),'grant_type':'client_credentials','client_secret':sp.get('clientSecret',''),'scope':'https://management.azure.com/.default'}); at=d.get('access_token',''); print('arm',len(at),flush=True)
+s,d=fq(f'https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token',{'client_id':sp.get('appId',''),'grant_type':'client_credentials','client_secret':sp.get('clientSecret',''),'scope':'https://management.azure.com/.default'}); at=d.get('access_token',''); print('arm',len(at),flush=True)
 u=f'{ARM}/subscriptions/{SUB}/resourceGroups/{RG}/providers/Microsoft.Web/sites/{APP}/restart?api-version=2023-01-01'; s,b=rq(u,'POST',b'',{'Authorization':'Bearer '+at},40); print('restart',s,b[:200],flush=True); time.sleep(12)
 u=f'{ARM}/subscriptions/{SUB}/resourceGroups/{RG}/providers/Microsoft.Web/sites/{APP}/config/publishingcredentials/list?api-version=2023-01-01'; s,d=jq(u,'POST',{},at,40); p=d.get('properties',{}); ku=p.get('publishingUserName',''); kp=p.get('publishingPassword',''); print('pub',s,bool(ku),len(kp),flush=True)
 if not ku or not kp: raise SystemExit
