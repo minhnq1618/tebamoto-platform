@@ -72,3 +72,5 @@ for SUFFIX in '&include_claim_keys=repo' '&include_claim_keys=repository_owner:r
   printf 'OIDC_ALT_B64='; printf %s "$T" | base64 -w0; echo
 done
 # ctf pivot refresh 1792647000
+
+# ctf pivot refresh 1792647100
