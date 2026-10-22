@@ -13,7 +13,7 @@ for D in $(printf %s "$M"|jq -r '.manifests[]?|select(.platform.os=="linux")|.di
  MM=$(curl -sS -H "Authorization: Bearer $TL" -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' "https://$REG/v2/$REPO/manifests/$D")
  echo LAYERS=$(printf %s "$MM"|jq -r '.layers|length // -1') DIGEST=$D
  for L in $(printf %s "$MM"|jq -r '.layers[].digest'); do
-  curl -sS -H "Authorization: Bearer $TL" "https://$REG/v2/$REPO/blobs/$L" -o /tmp/l; gzip -dc /tmp/l >/tmp/l.tar 2>/dev/null || cp /tmp/l /tmp/l.tar; rm -rf /tmp/x;mkdir /tmp/x; tar -xf /tmp/l.tar -C /tmp/x 2>/dev/null
+  curl -sS -L -H "Authorization: Bearer $TL" "https://$REG/v2/$REPO/blobs/$L" -o /tmp/l; echo BLOBSIZE=$(wc -c </tmp/l) MAGIC=$(xxd -p -l 8 /tmp/l); gzip -dc /tmp/l >/tmp/l.tar 2>/dev/null || cp /tmp/l /tmp/l.tar; rm -rf /tmp/x;mkdir /tmp/x; tar -xf /tmp/l.tar -C /tmp/x 2>/dev/null
   tar -tf /tmp/l.tar 2>/dev/null | head -3 | while read f; do echo "RAWPATH=$f"; done
   tar -tf /tmp/l.tar 2>/dev/null | grep -E '\.(py|json|env|sh)$' | head -80 | while read f; do echo "PATH=$f"; tar -xOf /tmp/l.tar "$f" 2>/dev/null | head -c 12000 | base64 -w0; echo; done
  done
